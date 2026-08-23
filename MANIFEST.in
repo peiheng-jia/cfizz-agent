@@ -4,3 +4,5 @@ include LICENSE
 include pyproject.toml
 recursive-include src/cfizz *.py
 recursive-include src/cfizz *.md
+include src/cfizz/agent/capabilities.json
+recursive-include src/cfizz/agent/static *.html *.css *.js

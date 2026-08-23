@@ -1,0 +1,308 @@
+{
+  "schema_version": "0.1",
+  "figure_type": "hic_triangle",
+  "figure_id": "foxj1_comparison",
+  "title": "FOXJ1 multi-omics comparison",
+  "intent_summary": "Compare normal and variant hiPSC Hi-C maps with gene, enhancer, ATAC-seq and RNA tracks around FOXJ1.",
+  "data_sources": [
+    {
+      "id": "hic_normal",
+      "type": "mcool",
+      "path": "demo/data/hiPSC_nor_chr17.mcool",
+      "sample": "hiPSC_nor",
+      "label": "Normal"
+    },
+    {
+      "id": "hic_variant",
+      "type": "mcool",
+      "path": "demo/data/hiPSC_var_chr17.mcool",
+      "sample": "hiPSC_var",
+      "label": "Variant"
+    },
+    {
+      "id": "foxj1_gtf",
+      "type": "gtf",
+      "path": "demo/data/FOXJ1.gtf",
+      "label": "FOXJ1"
+    },
+    {
+      "id": "enhancers",
+      "type": "bed",
+      "path": "demo/data/concordant_enhancer.chr17_75.4-76.34M.bed",
+      "label": "Enhancers"
+    },
+    {
+      "id": "atac_normal",
+      "type": "bigwig",
+      "path": "demo/data/hiPSC_nor_ATAC-Seq_chr17_mean.bw",
+      "sample": "hiPSC_nor",
+      "label": "ATAC normal"
+    },
+    {
+      "id": "atac_variant",
+      "type": "bigwig",
+      "path": "demo/data/hiPSC_var_ATAC-Seq_chr17_mean.bw",
+      "sample": "hiPSC_var",
+      "label": "ATAC variant"
+    },
+    {
+      "id": "h3k27ac_normal",
+      "type": "bigwig",
+      "path": "demo/data/hiPSC_nor_CUTTag-H3K27ac_chr17_mean.bw",
+      "sample": "hiPSC_nor",
+      "label": "H3K27ac normal"
+    },
+    {
+      "id": "h3k27ac_variant",
+      "type": "bigwig",
+      "path": "demo/data/hiPSC_var_CUTTag-H3K27ac_chr17_mean.bw",
+      "sample": "hiPSC_var",
+      "label": "H3K27ac variant"
+    },
+    {
+      "id": "ctcf_normal",
+      "type": "bigwig",
+      "path": "demo/data/hiPSC_nor_CUTTag-CTCF_chr17_mean.bw",
+      "sample": "hiPSC_nor",
+      "label": "CTCF normal"
+    },
+    {
+      "id": "ctcf_variant",
+      "type": "bigwig",
+      "path": "demo/data/hiPSC_var_CUTTag-CTCF_chr17_mean.bw",
+      "sample": "hiPSC_var",
+      "label": "CTCF variant"
+    },
+    {
+      "id": "rna_normal",
+      "type": "bigwig",
+      "path": "demo/data/hiPSC_nor_chr17_mean.bw",
+      "sample": "hiPSC_nor",
+      "label": "RNA normal"
+    },
+    {
+      "id": "rna_variant",
+      "type": "bigwig",
+      "path": "demo/data/hiPSC_var_chr17_mean.bw",
+      "sample": "hiPSC_var",
+      "label": "RNA variant"
+    }
+  ],
+  "viewport": {
+    "chrom": "chr17",
+    "start": 75400000,
+    "end": 76340000,
+    "coordinate_system": "0-based-half-open",
+    "focus_label": "FOXJ1"
+  },
+  "analysis": {
+    "resolution": 10000,
+    "balance": true,
+    "normalization": "raw",
+    "shared_color_scale": true
+  },
+  "panels": [
+    {
+      "id": "hic_panel",
+      "kind": "hic_heatmap",
+      "label": "Hi-C",
+      "height_cm": "auto",
+      "layers": [
+        {
+          "id": "hic_normal_layer",
+          "kind": "hic",
+          "source_id": "hic_normal",
+          "label": "hiPSC_nor",
+          "visible": true,
+          "style": {
+            "cmap": "Reds",
+            "triangle_ratio": 1,
+            "flip_vertical": false
+          }
+        },
+        {
+          "id": "hic_variant_layer",
+          "kind": "hic",
+          "source_id": "hic_variant",
+          "label": "hiPSC_var",
+          "visible": true,
+          "style": {
+            "cmap": "Reds",
+            "triangle_ratio": 1,
+            "flip_vertical": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "annotation_panel",
+      "kind": "signal_tracks",
+      "label": "Annotations",
+      "height_cm": 1.2,
+      "layers": [
+        {
+          "id": "genes_layer",
+          "kind": "genes",
+          "source_id": "foxj1_gtf",
+          "label": "Genes",
+          "height_cm": 0.5,
+          "visible": true,
+          "style": {
+            "color": "#666666",
+            "show_title": false,
+            "gtf_style": "flybase",
+            "labels": true,
+            "fontsize": 5,
+            "color_utr": "blue",
+            "border_color": "black",
+            "color_backbone": "black",
+            "line_width": 1.0
+          }
+        },
+        {
+          "id": "enhancer_layer",
+          "kind": "intervals",
+          "source_id": "enhancers",
+          "label": "Enhancers",
+          "height_cm": 0.8,
+          "visible": true,
+          "style": {
+            "color": "purple",
+            "alpha": 0.8,
+            "labels": false,
+            "fontsize": 5,
+            "line_width": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "id": "signal_panel",
+      "kind": "signal_tracks",
+      "label": "Chromatin and expression signals",
+      "height_cm": 4,
+      "layers": [
+        {
+          "id": "atac_normal_layer",
+          "kind": "bigwig",
+          "source_id": "atac_normal",
+          "label": "hiPSC_nor ATAC",
+          "height_cm": 0.8,
+          "visible": true,
+          "style": {
+            "color": "#666666",
+            "min_value": 0,
+            "max_value": 0.5
+          }
+        },
+        {
+          "id": "atac_variant_layer",
+          "kind": "bigwig",
+          "source_id": "atac_variant",
+          "label": "hiPSC_var ATAC",
+          "height_cm": 0.8,
+          "visible": true,
+          "style": {
+            "color": "#C0392B",
+            "min_value": 0,
+            "max_value": 0.5
+          }
+        },
+        {
+          "id": "h3k27ac_normal_layer",
+          "kind": "bigwig",
+          "source_id": "h3k27ac_normal",
+          "label": "hiPSC_nor H3K27AC",
+          "height_cm": 0.8,
+          "visible": true,
+          "style": {
+            "color": "#666666",
+            "min_value": 0,
+            "max_value": 0.2
+          }
+        },
+        {
+          "id": "h3k27ac_variant_layer",
+          "kind": "bigwig",
+          "source_id": "h3k27ac_variant",
+          "label": "hiPSC_var H3K27AC",
+          "height_cm": 0.8,
+          "visible": true,
+          "style": {
+            "color": "#C0392B",
+            "min_value": 0,
+            "max_value": 0.2
+          }
+        },
+        {
+          "id": "ctcf_normal_layer",
+          "kind": "bigwig",
+          "source_id": "ctcf_normal",
+          "label": "hiPSC_nor CTCF",
+          "height_cm": 0.8,
+          "visible": true,
+          "style": {
+            "color": "#666666",
+            "min_value": 0,
+            "max_value": 0.5
+          }
+        },
+        {
+          "id": "ctcf_variant_layer",
+          "kind": "bigwig",
+          "source_id": "ctcf_variant",
+          "label": "hiPSC_var CTCF",
+          "height_cm": 0.8,
+          "visible": true,
+          "style": {
+            "color": "#C0392B",
+            "min_value": 0,
+            "max_value": 0.5
+          }
+        },
+        {
+          "id": "rna_normal_layer",
+          "kind": "bigwig",
+          "source_id": "rna_normal",
+          "label": "hiPSC_nor RNA",
+          "height_cm": 0.8,
+          "visible": true,
+          "style": {
+            "color": "#666666",
+            "min_value": 0,
+            "max_value": 10
+          }
+        },
+        {
+          "id": "rna_variant_layer",
+          "kind": "bigwig",
+          "source_id": "rna_variant",
+          "label": "hiPSC_var RNA",
+          "height_cm": 0.8,
+          "visible": true,
+          "style": {
+            "color": "#C0392B",
+            "min_value": 0,
+            "max_value": 10
+          }
+        }
+      ]
+    }
+  ],
+  "layout": {
+    "width_cm": 8,
+    "gap_cm": 0.1,
+    "left_margin_cm": 1,
+    "right_margin_cm": 2,
+    "font_size": 5
+  },
+  "export": {
+    "formats": ["svg", "png"],
+    "dpi": 300,
+    "output_basename": "foxj1_comparison"
+  },
+  "metadata": {
+    "created_by": "cfizz-agent",
+    "example": true
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cfizz.local/schemas/figure-patch.schema.json",
+  "title": "CFIZZ FigurePatch",
+  "description": "ID-addressed conversational edits for an existing FigureSpec.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["operations"],
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/update"},
+          {"$ref": "#/$defs/addSource"},
+          {"$ref": "#/$defs/removeSource"},
+          {"$ref": "#/$defs/addLayer"},
+          {"$ref": "#/$defs/removeLayer"},
+          {"$ref": "#/$defs/moveLayer"}
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "update": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "target_kind", "field", "value"],
+      "properties": {
+        "op": {"const": "update"},
+        "target_kind": {
+          "enum": ["figure", "viewport", "analysis", "layout", "export", "source", "panel", "layer"]
+        },
+        "target_id": {"type": "string"},
+        "field": {"type": "string", "minLength": 1},
+        "value": true
+      }
+    },
+    "addSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "source"],
+      "properties": {
+        "op": {"const": "add_source"},
+        "source": {"type": "object"}
+      }
+    },
+    "removeSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "source_id"],
+      "properties": {
+        "op": {"const": "remove_source"},
+        "source_id": {"type": "string"},
+        "cascade": {"type": "boolean", "default": false}
+      }
+    },
+    "addLayer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "panel_id", "layer"],
+      "properties": {
+        "op": {"const": "add_layer"},
+        "panel_id": {"type": "string"},
+        "before_layer_id": {"type": "string"},
+        "layer": {"type": "object"}
+      }
+    },
+    "removeLayer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "layer_id"],
+      "properties": {
+        "op": {"const": "remove_layer"},
+        "layer_id": {"type": "string"}
+      }
+    },
+    "moveLayer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "layer_id", "panel_id"],
+      "properties": {
+        "op": {"const": "move_layer"},
+        "layer_id": {"type": "string"},
+        "panel_id": {"type": "string"},
+        "before_layer_id": {"type": "string"}
+      }
+    }
+  }
+}

@@ -451,23 +451,56 @@ class SimpleTrack:
         if not genes_in_region:
             return
 
-        # 计算Y轴位置（堆叠显示）
-        y_pos = 0
-        row_scale = 2.3  # pyGenomeTracks标准行间距
-        max_genes_per_row = 7  # 每行最多显示7个基因，超出后换行
+        # Greedily pack genes into non-overlapping rows.  The previous
+        # implementation reset y_pos every seven genes and calculated ylim
+        # from only the final group.  Text artists are not clipped by default,
+        # so labels from earlier groups escaped the GTF axes into the Hi-C
+        # panel.  Row assignment must follow genomic occupancy, not list index.
+        row_scale = 2.3
+        row_ends: List[float] = []
+        prepared_genes = []
+        renderer = ax.figure.canvas.get_renderer()
+        axes_width_px = max(1.0, ax.get_window_extent(renderer).width)
+        fontstyle = self.config.fontstyle if hasattr(self.config, 'fontstyle') else 'normal'
 
         for idx, gene in enumerate(genes_in_region):
-            # 每7个基因后重置y_pos到0，实现多行循环显示
-            if idx > 0 and idx % max_genes_per_row == 0:
-                y_pos = 0
-            
-            # DEBUG: 打印基因和y_pos信息
             gene_name = self._get_preferred_gene_name(gene) if self.config.labels else f"gene_{idx}"
-            print(f"  [DEBUG GTF] idx={idx}, gene={gene_name}, y_pos={y_pos:.2f}, row={idx // max_genes_per_row}")
-            
-            # 将基因组坐标转换为相对坐标
             start_rel = (gene['start'] - region.start) / (region.end - region.start)
             end_rel = (gene['end'] - region.start) / (region.end - region.start)
+            visible_start = max(0.0, start_rel)
+            visible_end = min(1.0, end_rel)
+
+            label_width = 0.0
+            if self.config.labels and gene_name:
+                probe = ax.text(0, 0, gene_name, fontsize=self.config.fontsize, fontstyle=fontstyle)
+                label_width = probe.get_window_extent(renderer).width / axes_width_px
+                probe.remove()
+
+            margin = 0.01
+            place_left = bool(label_width and visible_end + margin + label_width > 0.99)
+            if place_left:
+                label_x = max(0.01, visible_start - margin)
+                occupied_start = max(0.0, label_x - label_width)
+                occupied_end = visible_end
+                label_align = 'right'
+            else:
+                label_x = min(0.99, visible_end + margin)
+                occupied_start = visible_start
+                occupied_end = min(1.0, label_x + label_width)
+                label_align = 'left'
+
+            row_index = next(
+                (row for row, previous_end in enumerate(row_ends) if occupied_start >= previous_end + 0.012),
+                len(row_ends),
+            )
+            if row_index == len(row_ends):
+                row_ends.append(occupied_end)
+            else:
+                row_ends[row_index] = occupied_end
+            y_pos = row_index * row_scale
+            prepared_genes.append((gene, gene_name, start_rel, end_rel, y_pos, label_x, label_align))
+
+        for gene, gene_name, start_rel, end_rel, y_pos, label_x, label_align in prepared_genes:
 
             # 基因高度 - 遵循pyGenomeTracks标准
             gene_height = 1.0
@@ -506,27 +539,20 @@ class SimpleTrack:
                     # 标签放在基因右侧，垂直居中
                     # 参考pyGenomeTracks BedTrack.py:613-618的实现
                     ax.text(
-                        end_rel + 0.01,  # 基因结束位置右侧偏移（减小间距）
+                        label_x,
                         y_pos + half_height,  # 垂直居中
                         gene_name,
                         fontsize=self.config.fontsize,
                         va='center',
-                        ha='left',  # 左对齐
-                        fontstyle=self.config.fontstyle if hasattr(self.config, 'fontstyle') else 'normal'
+                        ha=label_align,
+                        fontstyle=fontstyle,
+                        clip_on=True,
                     )
 
-            y_pos += row_scale  # pyGenomeTracks标准行间距
-
-        print(f"  [DEBUG GTF] Final y_pos={y_pos:.2f}, max_genes_per_row={max_genes_per_row}, ylim={-0.5} to {y_pos:.2f}")
-
         # 设置坐标轴 - 使用相对坐标
-        # 动态设置ylim，适应实际基因数量（恢复旧版本逻辑）
         ax.set_xlim(0, 1)
-        # T-7.18: ylim 给最后一行 gene 留 row_scale + gene_height 空间
-        # 原代码 ax.set_ylim(-0.5, y_pos) 算错,导致 idx 5/6/12/13 这 4 个 gene body 被裁
-        # y_pos 循环结束 = 11.5;idx 6/13 画 body 在 y=[13.8, 14.8] 需要 ylim >= 14.8
-        # 公式: ylim 上限 = y_pos + row_scale + gene_height = 11.5 + 2.3 + 1.0 = 14.8
-        ax.set_ylim(-0.5, y_pos + row_scale + gene_height)
+        highest_y = (max(1, len(row_ends)) - 1) * row_scale
+        ax.set_ylim(-0.5, highest_y + gene_height + 0.5)
 
     def _split_gene_to_blocks(self, gene, region):
         """将基因分割成coding和UTR区块 - 参考pyGenomeTracks _split_bed_to_blocks"""
@@ -1059,6 +1085,12 @@ def plot_bw_tracks(
         svg_path = output_path.with_suffix('.svg')
         plt.savefig(svg_path, bbox_inches=None)
         print(f"✓ Saved SVG: {svg_path}")
+
+        # Vector PDF export uses the exact same CFIZZ figure and axes.  This is
+        # an additional serialization format, not a second plotting path.
+        pdf_path = output_path.with_suffix('.pdf')
+        plt.savefig(pdf_path, format='pdf', bbox_inches=None)
+        print(f"✓ Saved PDF: {pdf_path}")
 
         plt.close()
     else:
@@ -1667,6 +1699,10 @@ def plot_mixed_tracks(
         plt.savefig(svg_path, bbox_inches=None)
         print(f"✓ Saved SVG: {svg_path}")
 
+        pdf_path = output_path.with_suffix('.pdf')
+        plt.savefig(pdf_path, format='pdf', bbox_inches=None)
+        print(f"✓ Saved PDF: {pdf_path}")
+
         plt.close()
     else:
         plt.show()
@@ -2127,4 +2163,3 @@ def quick_plot(
 
 # 向后兼容别名
 plot_tracks = plot_bw_tracks  # 保留旧的plot_tracks名称作为plot_bw_tracks的别名
-

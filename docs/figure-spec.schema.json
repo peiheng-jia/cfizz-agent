@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cfizz.local/schemas/figure-spec.schema.json",
+  "title": "CFIZZ FigureSpec",
+  "description": "Stateful, reproducible specification for a CFIZZ Agent figure.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "figure_id",
+    "title",
+    "data_sources",
+    "viewport",
+    "panels",
+    "export"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "figure_type": {
+      "enum": ["hic_triangle", "hic_square", "hic_oe", "tad_insulation", "compartment", "loop_heatmap", "loop_apa"],
+      "default": "hic_triangle"
+    },
+    "figure_id": {
+      "$ref": "#/$defs/id"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "intent_summary": {
+      "type": "string"
+    },
+    "data_sources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dataSource"
+      }
+    },
+    "viewport": {
+      "$ref": "#/$defs/genomeRange"
+    },
+    "analysis": {
+      "$ref": "#/$defs/analysis"
+    },
+    "panels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/panel"
+      }
+    },
+    "layout": {
+      "$ref": "#/$defs/layout"
+    },
+    "export": {
+      "$ref": "#/$defs/export"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "dataSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "path"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "type": {
+          "enum": [
+            "cool",
+            "mcool",
+            "bigwig",
+            "gtf",
+            "gff",
+            "bed",
+            "bedpe",
+            "insulation_tsv",
+            "compartment_tsv",
+            "tad_tsv",
+            "loop_tsv"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sample": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "height_cm": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Optional per-layer height; takes precedence over equal panel height allocation."
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "inspection": {
+          "type": "object",
+          "description": "Resolved read-only metadata from the data inspector.",
+          "additionalProperties": true
+        }
+      }
+    },
+    "genomeRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chrom", "start", "end", "coordinate_system"],
+      "properties": {
+        "chrom": {
+          "type": "string",
+          "minLength": 1
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "coordinate_system": {
+          "const": "0-based-half-open"
+        },
+        "focus_label": {
+          "type": "string"
+        }
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resolution": {
+          "oneOf": [
+            {"type": "integer", "minimum": 1},
+            {"const": "auto"}
+          ],
+          "default": "auto"
+        },
+        "balance": {
+          "type": "boolean",
+          "default": true
+        },
+        "normalization": {
+          "enum": ["raw", "oe", "log2_oe"],
+          "default": "raw"
+        },
+        "shared_color_scale": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "panel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "layers"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "enum": [
+            "hic_heatmap",
+            "compartment",
+            "signal_tracks",
+            "saddle",
+            "tad_pileup",
+            "loop_apa"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "height_cm": {
+          "oneOf": [
+            {"type": "number", "exclusiveMinimum": 0},
+            {"const": "auto"}
+          ]
+        },
+        "layers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/layer"
+          }
+        }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "source_id", "visible", "style"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "enum": [
+            "hic",
+            "bigwig",
+            "genes",
+            "intervals",
+            "tad_boundaries",
+            "loops",
+            "compartment"
+          ]
+        },
+        "source_id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "type": "string"
+        },
+        "visible": {
+          "type": "boolean",
+          "default": true
+        },
+        "style": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "color": {"type": "string"},
+            "cmap": {"type": "string"},
+            "alpha": {"type": "number", "minimum": 0, "maximum": 1},
+            "line_width": {"type": "number", "minimum": 0},
+            "show_title": {"type": "boolean"},
+            "labels": {"type": "boolean"},
+            "fontsize": {"type": "number", "minimum": 1},
+            "gtf_style": {"type": "string"},
+            "color_utr": {"type": "string"},
+            "border_color": {"type": "string"},
+            "color_backbone": {"type": "string"},
+            "plot_type": {"type": "string"},
+            "y_scale_group": {
+              "description": "BigWig tracks with the same non-null value share one rendered y-axis range.",
+              "type": ["string", "null"]
+            },
+            "min_value": {"type": ["number", "null"]},
+            "max_value": {"type": ["number", "null"]},
+            "triangle_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+            "flip_vertical": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "width_cm": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 12
+        },
+        "gap_cm": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.15
+        },
+        "left_margin_cm": {
+          "type": "number",
+          "minimum": 0
+        },
+        "right_margin_cm": {
+          "type": "number",
+          "minimum": 0
+        },
+        "font_size": {
+          "type": "number",
+          "minimum": 3,
+          "maximum": 24,
+          "default": 5,
+          "description": "Base font size in points for labels, coordinates, ticks, and annotations."
+        }
+      }
+    },
+    "export": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["formats", "dpi"],
+      "properties": {
+        "formats": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["svg", "png", "pdf"]
+          }
+        },
+        "dpi": {
+          "type": "integer",
+          "minimum": 72,
+          "maximum": 1200
+        },
+        "output_basename": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

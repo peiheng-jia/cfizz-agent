@@ -27,6 +27,7 @@ def quick_plot_integrated(
     left_margin_cm: float = 1.0,
     right_margin_cm: float = 2.0,
     dpi: int = 300,
+    formats: Optional[List[str]] = None,
     triangle_ratio: float = 1.0,
     hic_cmap: str = 'Reds',
     hic_color_scale: str = 'linear',
@@ -223,7 +224,7 @@ def quick_plot_integrated(
 
             track_kwargs = {}
             for key, value in t.items():
-                if key not in ['file', 'color', 'name', 'min_value', 'height_cm']:
+                if key not in ['file', 'color', 'name', 'min_value', 'max_value', 'height_cm']:
                     track_kwargs[key] = value
             tracks_kwargs.append(track_kwargs)
 
@@ -234,6 +235,8 @@ def quick_plot_integrated(
             track_names = extracted_names
         if min_value is None and extracted_min_values:
             min_value = extracted_min_values
+        if max_value is None and extracted_max_values:
+            max_value = extracted_max_values
         if track_heights_cm is None and extracted_heights:
             track_heights_cm = extracted_heights
 
@@ -286,6 +289,7 @@ def quick_plot_integrated(
         layout=layout,
         output=output,
         dpi=dpi,
+        formats=formats,
         hic_cmap=extracted_hic_cmaps[0],
         hic_color_scale=extracted_hic_color_scales[0],
         balance=extracted_balances[0],

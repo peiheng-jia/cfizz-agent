@@ -1,0 +1,38 @@
+{
+  "summary": "增强 ATAC 轨道并放大 FOXJ1 区域",
+  "operations": [
+    {
+      "op": "update",
+      "target_kind": "layer",
+      "target_id": "atac_normal_layer",
+      "field": "style.color",
+      "value": "#0057B8"
+    },
+    {
+      "op": "update",
+      "target_kind": "layer",
+      "target_id": "atac_variant_layer",
+      "field": "style.color",
+      "value": "#D14900"
+    },
+    {
+      "op": "update",
+      "target_kind": "panel",
+      "target_id": "signal_panel",
+      "field": "height_cm",
+      "value": 5.2
+    },
+    {
+      "op": "update",
+      "target_kind": "viewport",
+      "field": "start",
+      "value": 75900000
+    },
+    {
+      "op": "update",
+      "target_kind": "viewport",
+      "field": "end",
+      "value": 76300000
+    }
+  ]
+}

@@ -311,7 +311,8 @@ def plot_heatmap_with_loops(
     loop_alpha=0.6,
     loop_size=50,
     balance=False,
-    dpi=1000
+    dpi=1000,
+    formats=None,
 ):
     """
     绘制带有loops标注的热图
@@ -397,14 +398,14 @@ def plot_heatmap_with_loops(
         loop_size=loop_size
     )
     
-    # 6. 保存图片（直接用 output_path 保存 PNG + SVG）
-    # 注意：output_path 是完整路径（不含扩展名），save_figure 需要支持这个
-    # 先保存 PNG
-    fig.savefig(f"{output_path}.png", dpi=dpi, bbox_inches='tight')
-    # 再保存 SVG
-    fig.savefig(f"{output_path}.svg", dpi=dpi, bbox_inches='tight')
+    # 6. 从同一张 CFIZZ Figure 导出所有请求的格式。
+    for fmt in (formats or ["png", "svg"]):
+        save_kwargs = {"format": fmt, "bbox_inches": "tight"}
+        if fmt == "png":
+            save_kwargs["dpi"] = dpi
+        fig.savefig(f"{output_path}.{fmt}", **save_kwargs)
     plt.close(fig)
-    print(f"图片已保存: {output_path}.png/.svg")
+    print(f"图片已保存: {output_path}.{'/'.join(formats or ['png', 'svg'])}")
 
 
 def plot_multi_heatmap_with_loops(
@@ -524,6 +525,7 @@ def plot_multi_heatmap_with_loops(
     # 4. 保存图片（直接保存 PNG + SVG）
     fig.savefig(f"{output_path}.png", dpi=dpi, bbox_inches='tight')
     fig.savefig(f"{output_path}.svg", dpi=dpi, bbox_inches='tight')
+    fig.savefig(f"{output_path}.pdf", bbox_inches='tight')
     plt.close(fig)
     print(f"图片已保存: {output_path}.png/.svg")
 

@@ -108,7 +108,10 @@ def plot_heatmap_with_e1(
     vmax: float = 2,
     cmap: Optional[LinearSegmentedColormap] = None,
     plot_size: float = 4.0,
-    bar_height_ratio: float = 0.3
+    bar_height_ratio: float = 0.3,
+    positive_color: str = "red",
+    negative_color: str = "blue",
+    formats=("png", "svg", "pdf"),
 ):
     """
     绘制 O/E 热图 + E1 柱状图
@@ -149,7 +152,10 @@ def plot_heatmap_with_e1(
     # 设置统一的绘图样式
     setup_plot_style()
     
-    if cmap is None:
+    if isinstance(cmap, str):
+        cmap = plt.colormaps[cmap].copy()
+        cmap.set_bad(color='#EEEEEE')
+    elif cmap is None:
         cmap = LinearSegmentedColormap.from_list('custom_coolwarm', ['blue', 'white', 'red'])
         cmap.set_bad(color='#EEEEEE')
     
@@ -212,7 +218,7 @@ def plot_heatmap_with_e1(
     
     # 绘制 E1 柱状图
     x = np.arange(len(e1_df))
-    colors = ['red' if v > 0 else 'blue' for v in e1_df['E1']]
+    colors = [positive_color if v > 0 else negative_color for v in e1_df['E1']]
     ax_bar.bar(x, e1_df['E1'], width=1.0, color=colors, edgecolor='none')
     
     # 调整 x 轴范围
@@ -225,7 +231,8 @@ def plot_heatmap_with_e1(
     add_bar_coordinates(ax_bar, show_labels=True, fontsize=5, label="EV1")
     
     # 保存图片
-    save_figure(fig, output_prefix)
+    from .layout import save_figure_multi_format
+    save_figure_multi_format(fig, output_prefix, formats=list(formats))
 
 
 def plot_compartment(
@@ -240,7 +247,11 @@ def plot_compartment(
     vmax: float = 2,
     sample_name: str = "sample",
     plot_size: float = 4.0,
-    bar_height_ratio: float = 0.3
+    bar_height_ratio: float = 0.3,
+    cmap: Optional[Any] = None,
+    positive_color: str = "red",
+    negative_color: str = "blue",
+    formats=("png", "svg", "pdf"),
 ) -> Dict[str, Any]:
     """
     生成 compartment 分析的可视化(纯可视化函数,读已计算产物)。
@@ -314,7 +325,11 @@ def plot_compartment(
             output_prefix=output_prefix,
             vmin=vmin, vmax=vmax,
             plot_size=plot_size,
-            bar_height_ratio=bar_height_ratio
+            bar_height_ratio=bar_height_ratio,
+            cmap=cmap,
+            positive_color=positive_color,
+            negative_color=negative_color,
+            formats=formats,
         )
     
     return {
@@ -605,11 +620,10 @@ def plot_multi_compartment(
             label_fontsize=5
         )
     
-    # 保存图片
-    if group_name and group_name not in output_prefix:
-        save_figure(fig, f"{output_prefix}_{group_name}")
-    else:
-        save_figure(fig, output_prefix)
+    # Save the same official CFIZZ figure in all Agent-supported formats.
+    from .layout import save_figure_multi_format
+    target = f"{output_prefix}_{group_name}" if group_name and group_name not in output_prefix else output_prefix
+    save_figure_multi_format(fig, target, formats=["png", "svg", "pdf"])
 
 
 def generate_multi_compartment(
@@ -720,5 +734,3 @@ def generate_multi_compartment(
         'output_prefix': output_prefix,
         'results': results
     }
-
-

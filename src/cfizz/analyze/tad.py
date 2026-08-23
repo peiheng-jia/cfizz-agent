@@ -632,9 +632,11 @@ def plot_tad_stacked_bar(plot_data: pd.DataFrame, comparison: str, window_mult: 
     comparison_clean = comparison.replace('--', '_')
     output_png = output_dir / f"tad_{comparison_clean}_{window_mult}b_stacked_bar.png"
     output_svg = output_dir / f"tad_{comparison_clean}_{window_mult}b_stacked_bar.svg"
+    output_pdf = output_dir / f"tad_{comparison_clean}_{window_mult}b_stacked_bar.pdf"
     
     plt.savefig(output_png, dpi=300, bbox_inches='tight')
     plt.savefig(output_svg, format='svg', bbox_inches='tight')
+    plt.savefig(output_pdf, format='pdf', bbox_inches='tight')
     plt.close()
     
     logger.info(f"  -> PNG: {output_png}")

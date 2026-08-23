@@ -574,7 +574,7 @@ def save_figure_multi_format(
     formats: list = None
 ):
     """
-    同时保存多种格式的图片（PNG + SVG）
+    同时保存多种格式的图片（PNG / SVG / PDF）
     
     Parameters
     ----------
@@ -585,7 +585,7 @@ def save_figure_multi_format(
     dpi : int
         位图格式的分辨率
     formats : list
-        要保存的格式列表，默认 ["png", "svg"]
+        要保存的格式列表，默认 ["png", "svg", "pdf"]
         
     Returns
     -------
@@ -593,7 +593,7 @@ def save_figure_multi_format(
         保存的文件路径列表
     """
     if formats is None:
-        formats = ["png", "svg"]
+        formats = ["png", "svg", "pdf"]
     
     import os
     out_dir = os.path.dirname(output_path)
@@ -613,6 +613,10 @@ def save_figure_multi_format(
         elif fmt == "jpg" or fmt == "jpeg":
             fig.savefig(save_path, format="jpeg", dpi=dpi, bbox_inches='tight', 
                        facecolor='white', edgecolor='none')
+        elif fmt == "pdf":
+            fig.savefig(save_path, format="pdf", bbox_inches='tight')
+        else:
+            raise ValueError(f"Unsupported figure format: {fmt}")
         saved_files.append(save_path)
     
     plt.close(fig)

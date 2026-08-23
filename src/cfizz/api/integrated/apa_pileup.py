@@ -215,7 +215,8 @@ def plot_apa_heatmap(
     cmap: str = 'Reds',
     dpi: int = 200,
     balance: bool = True,
-    n_processes: int = None
+    n_processes: int = None,
+    formats=None,
 ):
     """绘制APA热图
     
@@ -272,7 +273,7 @@ def plot_apa_heatmap(
     )
     
     # 5. 保存图片
-    save_figure_multi_format(fig, output_path, dpi=dpi)
+    save_figure_multi_format(fig, output_path, dpi=dpi, formats=formats or ["png", "svg"])
 
 def calculate_multi_apa(
     mcool_paths: List[str],
@@ -487,7 +488,7 @@ def visualize_multi_apa(
         )
     
     # 保存图片
-    save_figure_multi_format(fig, output_path, dpi=dpi)
+    save_figure_multi_format(fig, output_path, dpi=dpi, formats=["png", "svg", "pdf"])
 
 def plot_multi_apa_heatmap(
     mcool_paths: List[str],

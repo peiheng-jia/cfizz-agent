@@ -27,12 +27,21 @@ zone-terminal visualization.
 __version__ = "0.1.0"
 __author__ = "cfizz developers"
 
-# Core imports
-from . import io
-from . import analyze
-from . import viz
-from . import api
-from . import utils
+from importlib import import_module
+
+
+# Keep the package import lightweight. Scientific submodules are imported only
+# when accessed, so metadata and agent-side validation can run before optional
+# visualization dependencies are installed.
+_LAZY_MODULES = {"io", "analyze", "viz", "api", "utils", "agent"}
+
+
+def __getattr__(name):
+    if name in _LAZY_MODULES:
+        module = import_module(f"{__name__}.{name}")
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Version check
 def version():
@@ -45,5 +54,6 @@ __all__ = [
     "viz",
     "api",
     "utils",
+    "agent",
     "version",
 ]

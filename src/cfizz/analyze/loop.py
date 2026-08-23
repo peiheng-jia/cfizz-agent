@@ -984,9 +984,11 @@ def plot_loops_stacked_bar(data_dict: dict, comparison: str, output_dir: Path) -
     comparison_clean = comparison.replace('--', '_')
     output_png = output_dir / f"loops_{comparison_clean}_stacked_bar.png"
     output_svg = output_dir / f"loops_{comparison_clean}_stacked_bar.svg"
+    output_pdf = output_dir / f"loops_{comparison_clean}_stacked_bar.pdf"
 
     plt.savefig(output_png, dpi=300, bbox_inches='tight')
     plt.savefig(output_svg, format='svg', bbox_inches='tight')
+    plt.savefig(output_pdf, format='pdf', bbox_inches='tight')
     plt.close()
 
     print(f"  -> PNG: {output_png}")

@@ -41,6 +41,7 @@ class HeatmapTracks:
         layout: 'IntegratedLayout',
         output: str,
         dpi: int = 300,
+        formats: Optional[List[str]] = None,
         # Hi-C specific parameters
         hic_cmap: str = 'Reds',
         hic_color_scale: str = 'linear',
@@ -67,6 +68,7 @@ class HeatmapTracks:
         track_names: Optional[List[str]] = None,
         min_value: Optional[List[float]] = None,
         max_value: Optional[List[float]] = None,   # T-7.4 新加(跟 min_value 对称)
+        font_size: float = 5,
         **kwargs
     ) -> None:
         """
@@ -167,6 +169,7 @@ class HeatmapTracks:
         
         # Setup plot style
         setup_plot_style()
+        plt.rcParams['font.size'] = font_size
         
         # Create figure
         cm_to_inch = 1 / 2.54
@@ -229,7 +232,7 @@ class HeatmapTracks:
                 # Add sample label
                 if hic_labels_list[i]:
                     ax.text(-0.02, 0.5, hic_labels_list[i], ha='right', va='center',
-                           fontsize=5, rotation=90, transform=ax.transAxes)
+                           fontsize=font_size, rotation=90, transform=ax.transAxes)
                 
                 # Plot TAD boundaries if insulation file is provided
                 if i < len(insul_list) and insul_list[i] is not None:
@@ -280,8 +283,8 @@ class HeatmapTracks:
                 colorbar_bottom=0.75,
                 colorbar_width=0.2 / layout.total_width_cm,
                 colorbar_height=0.15,
-                label_fontsize=5,
-                tick_fontsize=5,
+                label_fontsize=font_size,
+                tick_fontsize=font_size,
                 label_orientation='horizontal'  # 水平 label（适合 45 度旋转热图）
             )
         
@@ -297,15 +300,19 @@ class HeatmapTracks:
             min_value=min_value,
             max_value=max_value,    # T-7.4 新加(跟 min_value 对称,不反转,跟现有 min_value 一致)
             tracks_kwargs=tracks_kwargs,
+            font_size=font_size,
         )
 
         # Add coordinate labels
-        _add_coordinate_labels(fig, layout.coordinate_label_area, region)
+        _add_coordinate_labels(fig, layout.coordinate_label_area, region, font_size=font_size)
 
-        # Save output
+        # Save all requested formats from the same canonical CFIZZ figure.
         output_path = Path(output)
-        fig.savefig(f"{output_path}.png", dpi=dpi)
-        fig.savefig(f"{output_path}.svg")
+        for fmt in (formats or ["png", "svg"]):
+            save_kwargs = {"format": fmt}
+            if fmt == "png":
+                save_kwargs["dpi"] = dpi
+            fig.savefig(f"{output_path}.{fmt}", **save_kwargs)
         plt.close()
 
     # ------------------------------------------------------------------
@@ -321,6 +328,7 @@ class HeatmapTracks:
         min_value=None,
         max_value=None,    # T-7.4 新加(跟 min_value 对称)
         tracks_kwargs=None,
+        font_size=5,
     ):
         """
         绘制 genomic tracks 到 fig 上的 layout.tracks_axes 指定位置。
@@ -337,6 +345,8 @@ class HeatmapTracks:
         if n_tracks == 0:
             return
 
+        numeric_axis_records = []
+
         for i, track_file in enumerate(track_files):
             if i >= len(layout.tracks_axes):
                 break
@@ -349,6 +359,10 @@ class HeatmapTracks:
             tk = {}
             if tracks_kwargs and i < len(tracks_kwargs):
                 tk = dict(tracks_kwargs[i])
+            tk.setdefault('fontsize', font_size)
+            # Rendering metadata is consumed here rather than passed to a
+            # concrete track constructor, whose kwargs vary by file type.
+            y_scale_group = tk.pop('y_scale_group', None)
 
             # 提取 styling(从外层列表)
             color = track_colors[i] if track_colors and i < len(track_colors) else '#333333'
@@ -377,7 +391,7 @@ class HeatmapTracks:
                     0.5, 0.5,
                     f'? {_os.path.basename(track_file)}: {e}',
                     ha='center', va='center',
-                    transform=ax.transAxes, fontsize=5,
+                    transform=ax.transAxes, fontsize=font_size,
                 )
                 continue
 
@@ -392,7 +406,7 @@ class HeatmapTracks:
                     0.5, 0.5,
                     f'! plot failed: {e}',
                     ha='center', va='center',
-                    transform=ax.transAxes, fontsize=5,
+                    transform=ax.transAxes, fontsize=font_size,
                 )
                 continue
 
@@ -443,31 +457,60 @@ class HeatmapTracks:
                     new_max = y_max_curr + y_padding
 
                 ax.set_ylim(new_min, new_max)
-                ax.set_yticks([new_min, new_max])
-                ax.tick_params(
-                    axis='y', which='major', length=3, labelsize=5,
-                    left=True, labelleft=False,
-                )
-
-                # 手动加 y 轴标签(black text)
-                y_offset = (new_max - new_min) * 0.2
-                label_y_min = new_min + y_offset
-                label_y_max = new_max - y_offset
-
-                ax.text(
-                    -0.05, label_y_min, format_y_axis_value(new_min),
-                    ha='right', va='center', fontsize=5, color='black',
-                    transform=ax.get_yaxis_transform(),
-                )
-                ax.text(
-                    -0.05, label_y_max, format_y_axis_value(new_max),
-                    ha='right', va='center', fontsize=5, color='black',
-                    transform=ax.get_yaxis_transform(),
-                )
+                numeric_axis_records.append({
+                    'ax': ax,
+                    'group': y_scale_group,
+                    'minimum': new_min,
+                    'maximum': new_max,
+                })
 
             # 隐藏 x 轴(由底部 coordinate_label_area 统一画)
             ax.set_xticks([])
             ax.set_xlabel('')
+
+        HeatmapTracks._finalize_track_y_axes(
+            numeric_axis_records,
+            formatter=format_y_axis_value,
+            font_size=font_size,
+        )
+
+    @staticmethod
+    def _finalize_track_y_axes(records, formatter, font_size=5):
+        """Unify requested groups, then draw labels from the final limits."""
+        groups = {}
+        for record in records:
+            if record['group']:
+                groups.setdefault(record['group'], []).append(record)
+        for grouped in groups.values():
+            if len(grouped) < 2:
+                continue
+            shared_min = min(record['minimum'] for record in grouped)
+            shared_max = max(record['maximum'] for record in grouped)
+            for record in grouped:
+                record['minimum'] = shared_min
+                record['maximum'] = shared_max
+                record['ax'].set_ylim(shared_min, shared_max)
+
+        for record in records:
+            ax = record['ax']
+            new_min, new_max = record['minimum'], record['maximum']
+            ax.set_ylim(new_min, new_max)
+            ax.set_yticks([new_min, new_max])
+            ax.tick_params(
+                axis='y', which='major', length=3, labelsize=font_size,
+                left=True, labelleft=False,
+            )
+            y_offset = (new_max - new_min) * 0.2
+            ax.text(
+                -0.05, new_min + y_offset, formatter(new_min),
+                ha='right', va='center', fontsize=font_size, color='black',
+                transform=ax.get_yaxis_transform(),
+            )
+            ax.text(
+                -0.05, new_max - y_offset, formatter(new_max),
+                ha='right', va='center', fontsize=font_size, color='black',
+                transform=ax.get_yaxis_transform(),
+            )
 
 
 def _plot_rotated_heatmap(
@@ -553,12 +596,12 @@ def _plot_rotated_heatmap(
     im.set_rasterized(True)
 
 
-def _add_coordinate_labels(fig, label_area, region):
+def _add_coordinate_labels(fig, label_area, region, font_size=5):
     """Add genomic coordinate labels with formatted coordinates (e.g., 5M instead of 5,000,000)."""
     ax = fig.add_axes(label_area)
-    ax.text(0, 0.5, print_coordinate(region.start), ha='left', va='center', fontsize=5, transform=ax.transAxes)
-    ax.text(1, 0.5, print_coordinate(region.end), ha='right', va='center', fontsize=5, transform=ax.transAxes)
-    ax.text(0.5, 0.5, region.chrom, ha='center', va='center', fontsize=5, transform=ax.transAxes)
+    ax.text(0, 0.5, print_coordinate(region.start), ha='left', va='center', fontsize=font_size, transform=ax.transAxes)
+    ax.text(1, 0.5, print_coordinate(region.end), ha='right', va='center', fontsize=font_size, transform=ax.transAxes)
+    ax.text(0.5, 0.5, region.chrom, ha='center', va='center', fontsize=font_size, transform=ax.transAxes)
     ax.set_xticks([])
     ax.set_yticks([])
     for spine in ax.spines.values():
@@ -991,6 +1034,7 @@ def quick_plot_integrated(
     left_margin_cm: float = 1.0,
     right_margin_cm: float = 2.0,
     dpi: int = 300,
+    font_size: float = 5,
     triangle_ratio: float = 0.5,
     hic_cmap: str = 'Reds',
     hic_color_scale: str = 'linear',
@@ -1137,6 +1181,7 @@ def quick_plot_integrated(
         layout=layout,
         output=output,
         dpi=dpi,
+        font_size=font_size,
         hic_cmap=hic_cmap,
         hic_color_scale=hic_color_scale,
         balance=balance,

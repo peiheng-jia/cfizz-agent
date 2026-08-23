@@ -1228,6 +1228,98 @@ cfizz/
     └── output/             # 跑 7 个 example 后生成的产物
 ```
 
+## 对话式绘图 Agent（开发中）
+
+仓库现已包含面向对话式可视化的确定性后端初稿：数据探查、FigureSpec 校验和 cfizz 渲染适配器。产品目标、交互原则与实现路线见 [`docs/agent-product-spec.md`](docs/agent-product-spec.md)，FigureSpec 示例见 [`docs/examples/figure-spec.integrated-demo.json`](docs/examples/figure-spec.integrated-demo.json)。
+
+### 从 GitHub 安装并启动
+
+发布包只包含程序、网页资源和文档；实验数据、生成的图、缓存及大型参考注释均不上传。用户需要准备自己的数据目录，并在启动时授权读取：
+
+```bash
+python -m pip install "cfizz[agent,all]"
+cfizz-agent --data-root /path/to/your/experiment
+```
+
+Windows PowerShell 示例：
+
+```powershell
+py -m pip install "cfizz[agent,all]"
+cfizz-agent --data-root "D:\\project\\case1"
+```
+
+浏览器打开 <http://127.0.0.1:8000>。有多个数据目录时重复 `--data-root`；也可用 `--host`、`--port` 和 `--runtime-dir` 指定监听地址及运行时文件目录。若从源码运行，继续使用下面的 `examples/agent/run_web.py` 即可。
+
+在尚未安装完整绘图依赖时，也可以先检查数据并生成渲染计划：
+
+```bash
+PYTHONPATH=src python examples/agent/inspect_and_plan.py \
+  docs/examples/figure-spec.integrated-demo.json \
+  --output-dir agent_output
+```
+
+对已有图进行一次可撤销的对话式修改并保存版本：
+
+```bash
+PYTHONPATH=src python examples/agent/edit_session.py \
+  docs/examples/figure-spec.integrated-demo.json \
+  docs/examples/figure-patch.make-atac-clearer.json \
+  --session-id foxj1_demo --render
+```
+
+启动“左侧聊天、右侧图形”的本地 Web 工作台：
+
+```bash
+# 在已安装 cfizz 科学依赖的环境中安装 Web 组件
+pip install -e ".[agent,all]"
+
+# 默认只允许读取项目目录；可重复传入 --data-root 授权其他数据目录
+python examples/agent/run_web.py --data-root /path/to/your/data
+
+# 浏览器访问 http://127.0.0.1:8000
+```
+
+工作台支持粘贴 `.cool/.mcool` 路径创建第一张图，也可以载入 FOXJ1 示例。未配置模型时，本地规则覆盖区域缩放、分辨率、轨道颜色、绘图字体、共享 y 轴、面板高度、撤销、重做和重新渲染。例如可输入“把图里的字体调大一点”“图中文字调到 8 pt”或“让下面四个 y 轴保持一致”。
+
+也可以在“从实验数据目录生成多组学图”中输入一个已授权的项目目录和目标基因（例如 `FOXJ1`）。Agent 会只读扫描目录中的 `.cool/.mcool`、BigWig、GTF/GFF、BED/BEDPE、E1 和 Loop 结果，推测样本分组与实验类型，并先展示识别摘要；确认后即可自动生成 FOXJ1 风格的 Hi-C + 基因 + 信号轨道整合图。目录不在当前授权范围时，可在页面中点击“授权此目录并重试”，授权只在当前服务进程有效。
+
+参考数据与实验数据分开管理。发布包不携带大型 GTF/Tabix/索引文件；安装后可通过数据目录授权或挂载 `references/hg38/` 提供 `Ensembl 110 / GRCh38.p14` 注释（项目中的 `references/hg38/README.md` 给出文件格式和索引命令）。提供完整参考后，用户可以直接输入 `TP53`、`MYC`、`BRCA1` 或 Ensembl gene ID（如 `ENSG00000141510`），Agent 会定位基因、切换视野，并按区域提取基因轨道。没有完整参考时，仍可使用用户提供的 GTF/GFF；FOXJ1 保留内置坐标作为最小演示兜底。使用其他 assembly（如 hg19）、其他注释版本或自定义注释时，应另行提供相应 GTF/GFF。参考 FASTA 只有在序列、motif 或 GC 分析时才需要，普通 Hi-C/BigWig/基因结构绘图不要求用户重复提供。
+
+自动组图接口也可直接调用：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/datasets/scan \
+  -H 'Content-Type: application/json' \
+  -d '{"path":"/path/to/case1","gene":"FOXJ1","reference_build":"hg38"}'
+
+curl -X POST http://127.0.0.1:8000/api/sessions/from-dataset \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"foxj1_case1","path":"/path/to/case1","gene":"FOXJ1","window":500000}'
+```
+
+单个 `.cool/.mcool` 载入后可在“图类型”中选择三角 Hi-C、方形 Hi-C、O/E、TAD/Insulation、A/B Compartment、Loop 标注热图和 Loop APA，也可直接说“画 O/E 热图”“画 A/B compartment 图”或“改成 Loop APA”。所有出图只能调用 `cfizz.api` 正式绘图入口；Agent 不创建坐标轴或提供替代风格。距离衰减 P(s) 因 CFIZZ 尚无统一风格的正式绘图 API，当前明确标记为未接入。图类型切换会进入同一个可撤销版本历史，之后仍可继续修改区域、分辨率、字体和样式。Agent 会在样本附近的 `output` 目录自动发现与样本匹配的 E1 或 Loop 结果并采用其实际分辨率；没有配套文件时会明确提示所需输入。
+
+如需启用更自然的对话理解，可直接在网页的“API 与数据设置”中选择 OpenAI 或 DeepSeek，填写 API Key 和可选模型后点击“连接并使用”。网页提交的密钥仅保存在当前服务进程的内存中，不写入项目、会话历史或浏览器存储，服务重启后自动清除。也可以继续通过服务端环境变量预配置：
+
+```bash
+# OpenAI
+export OPENAI_API_KEY="你的服务端 API Key"
+# 可选；默认使用兼顾能力与成本的 gpt-5.6-terra
+export CFIZZ_AGENT_MODEL="gpt-5.6-terra"
+
+# DeepSeek
+export DEEPSEEK_API_KEY="你的服务端 DeepSeek API Key"
+# 可选；默认 deepseek-chat
+export CFIZZ_DEEPSEEK_MODEL="deepseek-chat"
+
+# 可选：指定页面初始选中的供应商；也可在页面中随时切换
+export CFIZZ_AGENT_PROVIDER="deepseek"  # local / openai / deepseek
+
+python examples/agent/run_web.py --data-root /path/to/your/data
+```
+
+页面中的“对话理解 API”选择器会列出本地规则、OpenAI 和 DeepSeek；未配置的供应商可以在同一区域连接，已连接的供应商可以“断开并清除”。对话与“数据和 API”使用独立页签。连接 AI 后采用“AI 语义理解优先、本地安全执行和故障回退”的路由；撤销、重做及明确的参考基因操作仍可由本地确定性能力直接完成。模型只看到脱敏后的 FigureSpec 摘要、近期对话和绘图能力目录，不会收到文件路径、API Key 或原始组学数据；模型返回的能力调用还会经过目标解析、参数校验、FigurePatch 白名单校验和科学参数二次确认，不能直接执行代码。能力目录位于 `src/cfizz/agent/capabilities.json`，新增自然语言绘图操作时可在这里登记并接入受控编译器。
+
 ## 许可证
 
 MIT — 详见 [LICENSE](LICENSE) 文件。

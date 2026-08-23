@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CFIZZ Agent</title>
+    <link rel="stylesheet" href="/assets/app.css?v=22">
+</head>
+<body>
+  <main class="workspace">
+    <aside class="chat-pane">
+      <header class="brand">
+        <div class="mark">CF</div>
+        <div><h1>CFIZZ Agent</h1><p><span data-i18n="subtitle">对话式 Hi-C 可视化</span> <span id="plannerBadge" class="planner-badge">检测中</span></p></div>
+      </header>
+      <div class="toolbar">
+        <button id="demoButton" class="primary" data-i18n="loadDemo">载入 FOXJ1 示例</button>
+        <button id="undoButton" disabled data-i18n="undo">撤销</button>
+        <button id="redoButton" disabled data-i18n="redo">重做</button>
+        <select id="languageSelect" class="language-select" aria-label="Language"><option value="zh-CN">中文</option><option value="en">English</option></select>
+      </div>
+      <nav class="sidebar-tabs" aria-label="工作区">
+        <button id="chatTab" type="button" class="active" aria-selected="true" data-i18n="chat">对话</button>
+        <button id="settingsTab" type="button" aria-selected="false" data-i18n="dataApi">数据与 API</button>
+      </nav>
+      <section id="settingsPanel" class="sidebar-panel settings-panel" hidden>
+      <details id="workspaceSettings" class="workspace-settings" open>
+        <summary>API 与数据设置 <span id="settingsSummary">本地规则</span></summary>
+        <div class="provider-control">
+          <label for="plannerSelect" data-i18n="dialogueApi">理解模式</label>
+          <select id="plannerSelect" aria-label="选择对话理解 API"></select>
+          <small id="plannerHint" data-i18n="loadingConfig">正在读取配置……</small>
+          <details class="api-config">
+            <summary class="api-config-title"><strong data-i18n="connectAi">API 配置</strong><span data-i18n="memoryOnly">临时保存</span></summary>
+            <form id="apiConfigForm" class="api-config-body" autocomplete="off">
+              <div class="api-config-row">
+                <select id="apiProvider" aria-label="要配置的 API">
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="openai">OpenAI</option>
+                </select>
+                <input id="apiModel" aria-label="模型名称" placeholder="deepseek-chat" spellcheck="false">
+              </div>
+              <div class="api-key-row">
+                <input id="apiKey" type="password" aria-label="API Key" placeholder="输入 API Key" data-i18n-placeholder="apiKeyPlaceholder" autocomplete="new-password" spellcheck="false">
+                <button id="toggleApiKey" type="button" data-i18n="show">显示</button>
+              </div>
+              <div class="api-config-actions">
+                <button id="saveApiConfig" type="submit" class="primary" data-i18n="connectUse">连接并使用</button>
+                <button id="removeApiConfig" type="button" data-i18n="disconnect">断开并清除</button>
+              </div>
+              <small id="apiConfigStatus" data-i18n="keySecretHint">密钥仅保存在内存，服务重启后清除。</small>
+            </form>
+          </details>
+        </div>
+        <form id="dataForm" class="data-form">
+          <label for="dataPath" data-i18n="dataSource">数据源</label>
+          <div><input id="dataPath" placeholder="/data/sample.mcool 或 /data/case1" data-i18n-placeholder="dataPathPlaceholder"><button type="submit" data-i18n="load">加载</button></div>
+          <div class="dataset-options">
+            <input id="datasetGene" value="chr1:0-2Mb" placeholder="基因或范围（如 FOXJ1、chr1:1-2Mb）" data-i18n-placeholder="targetGene">
+            <select id="referenceBuild" aria-label="参考基因组版本"><option value="hg38" data-i18n="humanHg38">人类 hg38 / GRCh38</option></select>
+          </div>
+          <small id="datasetHint" data-i18n="datasetHint">支持单个 .cool/.mcool 或实验目录；扫描目录后可选择参与绘图的文件（默认全选）。</small>
+          <div id="datasetResults" class="dataset-results" hidden>
+            <div id="datasetSummary" data-i18n="combinedWorkflows"></div>
+            <div id="datasetResolution" class="dataset-resolution" hidden>
+              <label for="datasetResolutionSelect" data-i18n="resolutionChoice">共同分辨率</label>
+              <select id="datasetResolutionSelect" aria-label="选择共同分辨率"></select>
+              <small id="datasetResolutionHint"></small>
+            </div>
+            <div id="datasetFiles"></div>
+            <button id="authorizeDataset" type="button" hidden data-i18n="authorizeRetry">授权此目录并重试</button>
+            <input id="datasetUploadInput" type="file" multiple hidden accept=".cool,.mcool,.bw,.bigwig,.gtf,.gff,.gff3,.bed,.bedpe,.tsv,.txt,.npy">
+            <button id="uploadDataset" type="button" hidden data-i18n="uploadSupplement">上传补充文件</button>
+          </div>
+          <label for="figureTypeSelect" data-i18n="figureType">图类型</label>
+          <div><select id="figureTypeSelect" aria-label="选择图类型"></select><button id="applyFigureType" type="button" disabled data-i18n="applyCurrent">应用到当前图</button></div>
+          <small id="figureTypeHint" data-i18n="loadingTypes">正在读取图类型……</small>
+          <div class="dataset-actions">
+            <button id="buildDataset" type="button" class="primary dataset-build" disabled hidden data-i18n="buildSelected">生成所选图形</button>
+            <button id="addTracksDataset" type="button" class="dataset-build secondary" disabled hidden data-i18n="addTracks">添加轨道到当前图</button>
+          </div>
+          <details class="workflow-catalog"><summary data-i18n="workflowCatalog">需要额外结果的 CFIZZ 工作流</summary><div id="workflowCatalog"></div><section id="workflowConfigurator" class="workflow-configurator" hidden></section><small id="workflowActionHint" class="workflow-action-hint" hidden></small></details>
+        </form>
+      </details>
+      </section>
+      <section id="chatPanel" class="sidebar-panel conversation-panel">
+      <section id="messages" class="messages">
+        <article class="message assistant">
+          <span>Agent</span>
+          <p data-i18n="welcomeMessage">载入示例后，可以试试：“有的标签重叠了”“让下面四个 y 轴保持一致”或“把 ATAC normal 改成绿色”。</p>
+        </article>
+      </section>
+      <form id="chatForm" class="composer">
+        <textarea id="chatInput" rows="2" placeholder="告诉我你想怎样修改这张图……" data-i18n-placeholder="chatPlaceholder" disabled></textarea>
+        <button type="submit" class="primary" disabled data-i18n="sendDraw">发送并绘图</button>
+        <small data-i18n="enterHint">Enter 发送 · Shift+Enter 换行</small>
+      </form>
+      </section>
+    </aside>
+
+    <section class="figure-pane">
+      <header class="figure-header">
+        <div><p class="eyebrow" data-i18n="currentFigure">CURRENT FIGURE</p><h2 id="figureTitle" data-i18n="noFigure">尚未载入图形</h2></div>
+        <div class="figure-actions">
+          <button id="historyButton" type="button" class="history-button" disabled><span data-i18n="history">历史版本</span> <span id="historyCount">0</span></button>
+          <div class="status"><span id="statusDot"></span><span id="statusText">等待开始</span></div>
+        </div>
+      </header>
+      <div class="figure-stage">
+      <div id="canvas" class="canvas empty">
+        <div id="emptyState" class="empty-state"><strong data-i18n="startConversation">从一次对话开始</strong><p data-i18n="emptyHint">右侧会持续显示当前版本，修改不会覆盖历史图。</p></div>
+        <img id="figureImage" alt="CFIZZ rendering preview" hidden>
+        <div id="renderOverlay" class="render-overlay" hidden>
+          <div class="render-card">
+            <div class="spinner" aria-hidden="true"></div>
+            <strong id="renderTitle">正在生成图形</strong>
+            <p id="renderDetail">正在准备数据与绘图参数……</p>
+            <div class="progress-track"><span></span></div>
+            <small id="renderElapsed">已用时 0 秒</small>
+          </div>
+        </div>
+      </div>
+      <aside id="historyPanel" class="history-panel" hidden>
+        <header><div><strong data-i18n="versionHistory">版本历史</strong><small data-i18n="historyHint">选择任一版本恢复并重新绘图</small></div><button id="closeHistory" type="button" aria-label="关闭历史版本">×</button></header>
+        <div id="historyList" class="history-list"></div>
+      </aside>
+      </div>
+      <footer class="figure-footer">
+        <div><span data-i18n="region">区域</span><strong id="regionLabel">—</strong></div>
+        <div><span data-i18n="resolution">分辨率</span><strong id="resolutionLabel">—</strong></div>
+        <div><span data-i18n="version">版本</span><strong id="versionLabel">—</strong></div>
+        <div class="download-group">
+          <a id="svgDownload" class="download disabled" href="#" download><span data-i18n="download">下载</span> SVG</a>
+          <a id="pngDownload" class="download disabled" href="#" download><span data-i18n="download">下载</span> PNG</a>
+          <a id="pdfDownload" class="download disabled" href="#" download><span data-i18n="download">下载</span> PDF</a>
+        </div>
+      </footer>
+    </section>
+  </main>
+    <script src="/assets/app.js?v=52"></script>
+</body>
+</html>

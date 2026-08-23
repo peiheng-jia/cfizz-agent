@@ -531,7 +531,7 @@ def plot_easy_saddle(
     
     # 保存图形
     if output_file:
-        save_figure_multi_format(fig, output_file, dpi=300, formats=['png', 'svg'])
+        save_figure_multi_format(fig, output_file, dpi=300, formats=['png', 'svg', 'pdf'])
 
 
 def clear_saddle_cache(cache_dir: str = "cache"):
@@ -738,7 +738,7 @@ def plot_multi_saddle(
         )
     
     # 保存图片（多格式）
-    save_figure_multi_format(fig, output_prefix, dpi=300, formats=['png', 'svg'])
+    save_figure_multi_format(fig, output_prefix, dpi=300, formats=['png', 'svg', 'pdf'])
 
 
 def generate_multi_saddle(

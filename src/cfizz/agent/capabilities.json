@@ -1,0 +1,117 @@
+[
+  {
+    "id": "figure.set_type",
+    "description": "用当前数据创建或切换到另一种已接入的图。",
+    "examples": ["画方形热图", "画 O/E 图", "画 insulation score 轨道", "画方形 TAD 边界热图"],
+    "target_scope": "figure",
+    "allowed_kinds": [],
+    "arguments": {
+      "value": {"type": "string", "enum": ["hic_triangle", "hic_square", "hic_oe", "tad_insulation", "tad_insulation_track", "tad_boundary_square", "compartment", "loop_heatmap", "loop_apa"], "required": true}
+    },
+    "requires_confirmation": false
+  },
+  {
+    "id": "tracks.sync_y_axis",
+    "description": "设置数值信号轨道的 y 轴：全部共用、按测序技术分别共用、固定范围，或恢复独立缩放。用户说‘每种测序技术内部一致/按类型统一’时必须用 by_assay，不能用 auto。",
+    "examples": [
+      "让下面四个 y 轴保持一致",
+      "统一信号轨道的纵轴",
+      "按测序技术类型分别统一 y 轴最大值",
+      "ATAC 内部一致，CTCF 内部一致，H3K 内部一致",
+      "取消这些轨道的共享 y 轴"
+    ],
+    "target_scope": "layer",
+    "allowed_kinds": ["bigwig"],
+    "arguments": {
+      "mode": {"type": "string", "enum": ["auto", "by_assay", "fixed", "independent"], "required": true},
+      "min_value": {"type": "number", "required": false},
+      "max_value": {"type": "number", "required": false}
+    },
+    "requires_confirmation": false
+  },
+  {
+    "id": "tracks.reorder",
+    "description": "调整当前图中基因、区间和 BigWig 轨道的显示顺序。target 选择要移动的那一条；before_layer_id 指定它要放到哪条轨道之前，省略则放到目标面板末尾。",
+    "examples": [
+      "把 ATAC normal 放到 CTCF normal 上面",
+      "把 MYC 基因轨道放到 ATAC 前面",
+      "把 RNA 放到最后"
+    ],
+    "target_scope": "layer",
+    "allowed_kinds": ["bigwig", "genes", "intervals"],
+    "arguments": {
+      "before_layer_id": {"type": "string", "required": false}
+    },
+    "requires_confirmation": false
+  },
+  {
+    "id": "figure.set_font_size",
+    "description": "调整生成图内的基础字体大小。",
+    "examples": ["图中文字调到 8 pt", "把图里的字体调大一点"],
+    "target_scope": "layout",
+    "allowed_kinds": [],
+    "arguments": {
+      "value": {"type": "number", "minimum": 3, "maximum": 24, "required": true}
+    },
+    "requires_confirmation": false
+  },
+  {
+    "id": "viewport.set_region",
+    "description": "修改当前基因组可视区域。",
+    "examples": ["放大到 chr17:75.9M-76.3M"],
+    "target_scope": "viewport",
+    "allowed_kinds": [],
+    "arguments": {
+      "chrom": {"type": "string", "required": true},
+      "start": {"type": "integer", "minimum": 0, "required": true},
+      "end": {"type": "integer", "minimum": 1, "required": true}
+    },
+    "requires_confirmation": false
+  },
+  {
+    "id": "analysis.set_resolution",
+    "description": "修改 Hi-C 分析分辨率。",
+    "examples": ["分辨率改成 10 kb"],
+    "target_scope": "analysis",
+    "allowed_kinds": [],
+    "arguments": {
+      "value": {"type": "integer", "minimum": 1, "required": true}
+    },
+    "requires_confirmation": true
+  },
+  {
+    "id": "layer.set_color",
+    "description": "修改一个或多个图层的颜色或 Hi-C 色图。",
+    "examples": ["把 ATAC normal 改成绿色"],
+    "target_scope": "layer",
+    "allowed_kinds": ["hic", "bigwig", "genes", "intervals"],
+    "arguments": {
+      "value": {"type": "string", "required": true}
+    },
+    "requires_confirmation": false
+  },
+  {
+    "id": "layer.set_diverging_palette",
+    "description": "修改 Hi-C O/E 或 A/B compartment 的发散色图，并同步正负 E1 颜色。",
+    "examples": ["把红蓝配色换成紫绿色", "当前 compartment 改成蓝橙配色", "热图换一套发散色"],
+    "target_scope": "layer",
+    "allowed_kinds": ["hic"],
+    "arguments": {
+      "cmap": {"type": "string", "required": true},
+      "positive_color": {"type": "string", "required": true},
+      "negative_color": {"type": "string", "required": true}
+    },
+    "requires_confirmation": false
+  },
+  {
+    "id": "panel.set_height",
+    "description": "设置面板高度，单位为厘米。",
+    "examples": ["把信号面板拉高一点"],
+    "target_scope": "panel",
+    "allowed_kinds": [],
+    "arguments": {
+      "value": {"type": "number", "minimum": 0.2, "maximum": 50, "required": true}
+    },
+    "requires_confirmation": false
+  }
+]

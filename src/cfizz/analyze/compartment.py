@@ -916,10 +916,12 @@ def plot_compartment_scatter(df: pd.DataFrame, treatment_name: str, comparison: 
     ax3.axvline(x=0, color='gray', linestyle='--', linewidth=0.3, alpha=0.5)
 
     output_svg = output_dir / f"compartment_{comparison}_scatter.svg"
+    output_pdf = output_dir / f"compartment_{comparison}_scatter.pdf"
     output_png = output_dir / f"compartment_{comparison}_scatter.png"
 
     figure.savefig(output_svg, format='svg')
     figure.savefig(output_png, format='png', dpi=600)
+    figure.savefig(output_pdf, format='pdf')
     plt.close()
 
     logger.info(f"  -> 散点图已保存: {output_svg}")
