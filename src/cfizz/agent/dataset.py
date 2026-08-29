@@ -361,16 +361,18 @@ def scan_dataset(
         missing.append(f"未在当前 GTF 或内置参考中定位基因 {gene}")
     if len(hic) >= 1 and not reference_files:
         if references.has_complete_annotation(build):
+            annotation = str(reference.get("annotation") or build)
+            record_kind = "人类基因记录" if reference.get("species") == "human" else "基因记录"
             warnings.append(
-                f"当前实验目录未发现 GTF；将使用项目公共参考 Ensembl 110 / GRCh38.p14，"
-                f"可按名称定位和标注其中 {references.complete_gene_count(build):,} 条人类基因记录。"
+                f"当前实验目录未发现 GTF；将使用项目公共参考 {annotation}，"
+                f"可按名称定位和标注其中 {references.complete_gene_count(build):,} 条{record_kind}。"
             )
         else:
             bundled_genes = references.bundled_gene_names(build)
             if bundled_genes:
                 warnings.append(
                     f"当前实验目录未发现 GTF；项目公共参考可直接标注 {len(bundled_genes)} 个示例基因："
-                    f"{'、'.join(bundled_genes)}。如需标注任意人类基因，请配置完整的 {build} GTF/GFF。"
+                    f"{'、'.join(bundled_genes)}。如需标注任意基因，请配置完整的 {build} GTF/GFF。"
                 )
             else:
                 warnings.append(f"当前实验目录和项目公共参考均未发现基因注释；请提供匹配版本的 {build} GTF/GFF。")

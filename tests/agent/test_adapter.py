@@ -82,6 +82,69 @@ class AdapterTests(unittest.TestCase):
                 self.assertTrue(request.entrypoint.endswith(suffix))
                 self.assertTrue(request.kwargs["source_path"].endswith("hiPSC_nor_chr17.mcool"))
 
+    def test_single_heatmap_registered_scale_options_reach_public_api(self):
+        inspector = DataInspector([str(PROJECT_ROOT)])
+        validator = FigureSpecValidator(inspector)
+        spec = json.loads(json.dumps(self.spec))
+        spec["figure_type"] = "hic_square"
+        layer = next(
+            layer for panel in spec["panels"] for layer in panel["layers"]
+            if layer["kind"] == "hic"
+        )
+        layer.setdefault("style", {}).update({
+            "cmap": "viridis",
+            "color_scale": "log",
+            "vmin": 0.01,
+            "vmax": 5,
+            "plot_size": 6,
+        })
+        with tempfile.TemporaryDirectory() as output_dir:
+            request = CfizzRenderAdapter(validator, output_dir).build_request(
+                spec, inspect_files=False,
+            )
+        self.assertEqual(request.kwargs["cmap"], "viridis")
+        self.assertEqual(request.kwargs["color_scale"], "log")
+        self.assertEqual(request.kwargs["vmin"], 0.01)
+        self.assertEqual(request.kwargs["vmax"], 5)
+        self.assertEqual(request.kwargs["plot_size"], 6)
+
+    def test_standalone_track_workflow_forwards_registered_layer_styles(self):
+        inspector = DataInspector([str(PROJECT_ROOT)])
+        validator = FigureSpecValidator(inspector)
+        spec = json.loads(json.dumps(self.spec))
+        spec["figure_type"] = "tracks_signal"
+        layer = next(
+            layer for panel in spec["panels"] for layer in panel["layers"]
+            if layer["kind"] == "bigwig"
+        )
+        layer["visible"] = True
+        layer["height_cm"] = 1.7
+        layer.setdefault("style", {}).update({
+            "color": "#0072B2",
+            "alpha": 0.4,
+            "plot_type": "line",
+            "line_width": 1.25,
+            "number_of_bins": 900,
+            "summary_method": "max",
+            "min_value": -1,
+            "max_value": 8,
+        })
+        spec["workflow_source_ids"] = [layer["source_id"]]
+        with tempfile.TemporaryDirectory() as output_dir:
+            request = CfizzRenderAdapter(validator, output_dir).build_request(
+                spec, inspect_files=False,
+            )
+        self.assertEqual(request.entrypoint, "cfizz.api.plot_track_files")
+        self.assertEqual(len(request.kwargs["tracks"]), 1)
+        track = request.kwargs["tracks"][0]
+        for key in (
+            "color", "alpha", "plot_type", "line_width", "number_of_bins",
+            "summary_method", "min_value", "max_value",
+        ):
+            self.assertEqual(track[key], layer["style"][key])
+        self.assertEqual(request.kwargs["track_heights"], [1.7])
+        self.assertEqual(request.kwargs["formats"], ("svg", "png"))
+
     def test_multi_hic_workflow_binds_to_official_cfizz_api(self):
         inspector = DataInspector([str(PROJECT_ROOT)])
         validator = FigureSpecValidator(inspector)
@@ -95,6 +158,48 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(len(request.kwargs["file_paths"]), 2)
         self.assertEqual(request.kwargs["formats"], ("svg", "png"))
         self.assertEqual(request.kwargs["plot_size"], 4)
+
+    def test_compartment_diff_scatter_forwards_palette_to_cfizz(self):
+        inspector = DataInspector([str(PROJECT_ROOT)])
+        validator = FigureSpecValidator(inspector)
+        spec = json.loads(json.dumps(self.spec))
+        spec["figure_type"] = "compartment_diff_scatter"
+        spec["data_sources"].extend([
+            {
+                "id": "control_e1", "type": "compartment_tsv",
+                "path": "demo/results/control.100kb.E1.tsv", "sample": "control",
+            },
+            {
+                "id": "treatment_e1", "type": "compartment_tsv",
+                "path": "demo/results/treatment.100kb.E1.tsv", "sample": "treatment",
+            },
+        ])
+        spec["workflow_source_ids"] = ["control_e1", "treatment_e1"]
+        spec["workflow_options"] = {
+            "stable_a_color": "#0072B2",
+            "stable_b_color": "#009E73",
+            "a_to_b_color": "#E69F00",
+            "b_to_a_color": "#D55E00",
+            "control_density_color": "#56B4E9",
+            "treatment_density_color": "#CC79A7",
+            "point_size": 2.5,
+            "point_alpha": 0.65,
+            "density_alpha": 0.35,
+            "width_cm": 9,
+            "height_cm": 7,
+            "font_size": 8,
+            "show_counts": False,
+        }
+        with tempfile.TemporaryDirectory() as output_dir:
+            request = CfizzRenderAdapter(validator, output_dir).build_request(
+                spec, inspect_files=False,
+            )
+
+        self.assertEqual(request.entrypoint, "cfizz.api.analyze_compartment_difference")
+        self.assertTrue(request.kwargs["control_e1_path"].endswith("control.100kb.E1.tsv"))
+        self.assertTrue(request.kwargs["treatment_e1_path"].endswith("treatment.100kb.E1.tsv"))
+        for key, value in spec["workflow_options"].items():
+            self.assertEqual(request.kwargs[key], value)
 
     def test_loop_workflow_forwards_marker_options_to_official_cfizz_api(self):
         """Loop marker edits must reach CFIZZ as loop_size, not triangle_ratio."""

@@ -9,6 +9,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .figure_spec import FigureSpecValidator, ValidationResult
 from .companions import companion_resolution, discover_companion, is_differential_tad_table
+from .parameters import (
+    effective_workflow_options,
+    layer_style_defaults,
+    layer_style_parameter_names,
+)
 
 
 _WORKFLOW_FIGURE_TYPES = {
@@ -48,6 +53,36 @@ def _ordered_panels_for_render(panels: List[Dict[str, Any]]) -> List[Dict[str, A
     indexed = list(enumerate(panels))
     indexed.sort(key=lambda pair: (priority(pair[1]), pair[0]))
     return [panel for _, panel in indexed]
+
+
+def _registered_track_config(
+    figure_type: str,
+    layer: Dict[str, Any],
+    source: Dict[str, Any],
+    source_path: str,
+    *,
+    include_type: bool = False,
+) -> Dict[str, Any]:
+    """Build a CFIZZ track config from registered, effective style keys."""
+    style = layer.get("style") or {}
+    config: Dict[str, Any] = {
+        "file": source_path,
+        "name": None if style.get("show_title") is False else (
+            layer.get("label") or source.get("label") or source.get("sample")
+        ),
+    }
+    if include_type:
+        source_type = "gtf" if source.get("type") == "gff" else source.get("type")
+        config["type"] = source_type
+    defaults = layer_style_defaults(figure_type, str(layer.get("kind")))
+    for key in layer_style_parameter_names(figure_type, str(layer.get("kind"))):
+        if key in {"show_title"}:
+            continue
+        if key in style:
+            config[key] = style[key]
+        elif key in defaults:
+            config[key] = defaults[key]
+    return config
 
 
 @dataclass(frozen=True)
@@ -241,19 +276,13 @@ class CfizzRenderAdapter:
         track_heights = []
         for panel, layer in track_layers:
             source = sources[layer["source_id"]]
-            style = layer.get("style", {})
-            track = {
-                "file": str(self.validator.inspector.resolve_path(source["path"])) if self.validator.inspector else source["path"],
-                "name": None if style.get("show_title") is False else (layer.get("label") or source.get("label")),
-                "color": style.get("color", "#333333"),
-            }
-            for key in (
-                "alpha", "labels", "fontsize", "gtf_style", "color_utr",
-                "border_color", "color_backbone", "line_width", "plot_type",
-                "min_value", "max_value", "y_scale_group",
-            ):
-                if key in style:
-                    track[key] = style[key]
+            track = _registered_track_config(
+                figure_type,
+                layer,
+                source,
+                str(self.validator.inspector.resolve_path(source["path"]))
+                if self.validator.inspector else source["path"],
+            )
             tracks.append(track)
             if layer.get("height_cm") is not None:
                 track_heights.append(float(layer["height_cm"]))
@@ -445,19 +474,9 @@ class CfizzRenderAdapter:
                 source = selected_sources.get(layer.get("source_id"))
                 if source is None:
                     continue
-                style = layer.get("style", {})
-                track = {
-                    "file": path(source),
-                    "name": None if style.get("show_title") is False else (layer.get("label") or source.get("label")),
-                    "color": style.get("color", "#333333"),
-                }
-                for key in (
-                    "alpha", "labels", "fontsize", "gtf_style", "color_utr",
-                    "border_color", "color_backbone", "line_width", "plot_type",
-                    "min_value", "max_value", "y_scale_group",
-                ):
-                    if key in style:
-                        track[key] = style[key]
+                track = _registered_track_config(
+                    figure_type, layer, source, path(source),
+                )
                 tracks.append(track)
                 if layer.get("height_cm") is not None:
                     track_heights.append(float(layer["height_cm"]))
@@ -641,13 +660,37 @@ class CfizzRenderAdapter:
                 "tracks_signal": {"bigwig"}, "tracks_genes": {"gtf", "gff"},
                 "tracks_intervals": {"bed"}, "tracks_mixed": {"bigwig", "gtf", "gff", "bed"},
             }[figure_type]
-            track_sources = [item for item in selected_sources.values() if item.get("type") in allowed]
+            layer_by_source = {
+                layer.get("source_id"): (panel, layer)
+                for panel, layer in track_layers
+                if layer.get("source_id")
+            }
+            track_sources = [
+                item for item in selected_sources.values()
+                if item.get("type") in allowed
+                and (not layer_by_source or item.get("id") in layer_by_source)
+            ]
             if not track_sources:
                 raise ValueError("该独立轨道图缺少匹配的 BigWig/GTF/BED 数据源。")
             track_configs = []
+            track_heights = []
             for item in track_sources:
-                source_type = "gtf" if item.get("type") == "gff" else item["type"]
-                track_configs.append({"file": path(item), "type": source_type, "name": item.get("label")})
+                panel, layer = layer_by_source.get(item.get("id"), ({}, {
+                    "kind": {
+                        "bigwig": "bigwig", "gtf": "genes", "gff": "genes", "bed": "intervals",
+                    }[item["type"]],
+                    "label": item.get("label"), "style": {},
+                }))
+                track_configs.append(_registered_track_config(
+                    figure_type, layer, item, path(item), include_type=True,
+                ))
+                if layer.get("height_cm") is not None:
+                    track_heights.append(float(layer["height_cm"]))
+                else:
+                    height = panel.get("height_cm", 1.0)
+                    track_heights.append(
+                        1.0 if height == "auto" else float(height) / max(1, len(panel.get("layers", [])))
+                    )
             entrypoint = "cfizz.api.plot_track_files"
             kwargs = {
                 "tracks": track_configs, "chrom": common["chrom"],
@@ -655,7 +698,9 @@ class CfizzRenderAdapter:
                 "output": output_prefix, "width": resolved["layout"].get("width_cm", 12),
                 "left_margin": resolved["layout"].get("left_margin_cm", 1.5),
                 "right_margin": resolved["layout"].get("right_margin_cm", 2),
+                "track_heights": track_heights or None,
                 "dpi": export.get("dpi", 300),
+                "formats": tuple(formats),
             }
             expected = [f"{output_prefix}.{fmt}" for fmt in formats]
         elif figure_type in {"compartment_diff_scatter", "tad_diff_stacked", "loop_diff_stacked"}:
@@ -676,6 +721,7 @@ class CfizzRenderAdapter:
             kwargs = {
                 "comparison": "treatment--control", "output_root": str(self.output_root),
                 "run_mode": "all", names[0]: path(inputs[0]), names[1]: path(inputs[1]),
+                "dpi": export.get("dpi", 300),
             }
             if figure_type == "tad_diff_stacked":
                 kwargs["window_mult"] = 10
@@ -760,29 +806,8 @@ class CfizzRenderAdapter:
 
     @staticmethod
     def _validated_workflow_options(figure_type: str, options: Dict[str, Any]) -> Dict[str, Any]:
-        """Allow typed scientific parameters, never arbitrary API kwargs."""
-        allowed = {
-            "hic_multi": {"cmap", "color_scale", "vmin", "vmax", "plot_size"},
-            "compartment_multi": {"vmin", "vmax", "plot_size", "bar_height_ratio"},
-            "compartment_diff_region": {"vmin", "vmax", "plot_size", "bar_height_ratio"},
-            "compartment_saddle": {"n_bins", "contact_type", "heatmap_size", "vmin", "vmax"},
-            "tad_multi": {"window_size", "cmap", "vmin", "vmax", "color_scale", "plot_size", "triangle_ratio", "boundary_cmap", "boundary_alpha"},
-            "tad_boundary_pileup": {"flank", "vmin", "vmax", "cmap", "method", "color_scale", "top_n", "plot_size"},
-            "tad_diff_pileup": {"flank", "vmin", "vmax", "cmap", "method", "color_scale", "top_n", "plot_size"},
-            "loop_multi": {"cmap", "vmin", "vmax", "color_scale", "loop_color", "loop_alpha", "loop_size", "plot_size"},
-            "loop_diff_region": {"cmap", "vmin", "vmax", "color_scale", "loop_color", "loop_alpha", "loop_size", "plot_size"},
-            "loop_apa_multi": {"window", "corner_size", "min_distance", "vmin", "vmax", "cmap", "plot_size"},
-            "loop_diff_apa": {"window", "corner_size", "min_distance", "vmin", "vmax", "cmap", "plot_size"},
-            "tad_diff_region": {"window_size", "cmap", "color_scale", "triangle_ratio", "boundary_cmap", "boundary_alpha"},
-        }.get(figure_type, set())
-        result = {}
-        for key, value in options.items():
-            if key not in allowed:
-                raise ValueError(f"{figure_type} 不支持工作流参数 {key!r}。")
-            if not isinstance(value, (str, int, float, bool)) or isinstance(value, bool) and key not in {"balance"}:
-                raise ValueError(f"工作流参数 {key!r} 的类型无效。")
-            result[key] = value
-        return result
+        """Validate against the authoritative parameter registry."""
+        return effective_workflow_options(figure_type, options)
 
     @staticmethod
     def _cooler_uri(path: str, source_type: Optional[str], resolution: int) -> str:
@@ -878,9 +903,12 @@ class CfizzRenderAdapter:
         output_prefix = str(self.output_root / output_basename)
         formats = export.get("formats", ["svg", "png", "pdf"])
         hic_style = hic_layer.get("style", {})
-        cmap = hic_style.get("cmap", "Reds")
+        default_cmap = "RdBu_r" if figure_type == "hic_oe" else "Reds"
+        cmap = hic_style.get("cmap", default_cmap)
         if figure_type == "compartment" and cmap == "Reds" and "positive_color" not in hic_style:
             cmap = None  # Preserve cfizz.viz.compartment's canonical blue-white-red default.
+        default_vmin = -2 if figure_type == "compartment" else 0.25 if figure_type == "hic_oe" else None
+        default_vmax = 2 if figure_type == "compartment" else 4 if figure_type == "hic_oe" else None
         return RenderRequest(
             entrypoint=entrypoints[figure_type],
             kwargs={
@@ -896,18 +924,26 @@ class CfizzRenderAdapter:
                 "dpi": export.get("dpi", 300),
                 "formats": formats,
                 "cmap": cmap,
+                "color_scale": hic_style.get("color_scale", "linear"),
                 "positive_color": hic_style.get("positive_color", "red"),
                 "negative_color": hic_style.get("negative_color", "blue"),
-                "vmin": hic_style.get("vmin", -2),
-                "vmax": hic_style.get("vmax", 2),
+                "vmin": hic_style.get("vmin", default_vmin),
+                "vmax": hic_style.get("vmax", default_vmax),
                 "plot_size": hic_style.get("plot_size", 4.0),
                 "bar_height_ratio": hic_style.get("bar_height_ratio", 0.3),
                 "loop_color": hic_style.get("loop_color", "blue"),
                 "loop_alpha": hic_style.get("loop_alpha", 0.6),
                 "loop_size": hic_style.get("loop_size", 2),
+                "window": hic_style.get("window", 5),
+                "corner_size": hic_style.get("corner_size", 3),
+                "min_distance": hic_style.get("min_distance", 10),
                 "window_size": hic_style.get("window_size", 100_000),
+                "color": hic_style.get("line_color", "#1f77b4"),
                 "boundary_color": hic_style.get("boundary_color", "#d62728"),
                 "boundary_width": hic_style.get("boundary_width", 2),
+                "show_boundaries": hic_style.get("show_boundaries", True),
+                "width_cm": hic_style.get("width_cm", 25.4),
+                "height_cm": hic_style.get("height_cm", 5.08),
                 "font_size": resolved["layout"].get("font_size", 5),
             },
             output_prefix=output_prefix,

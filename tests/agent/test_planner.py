@@ -17,7 +17,13 @@ from cfizz.agent.planner import (
     compile_plan,
     public_figure_context,
 )
-from cfizz.agent.parameters import ParameterCatalog
+from cfizz.agent.parameters import (
+    ParameterCatalog,
+    validate_workflow_options,
+    visualization_parameter_catalog,
+    workflow_parameter_names,
+)
+from cfizz.agent.figure_types import FIGURE_TYPES
 from cfizz.agent.capabilities import CapabilityCall, TargetSelector
 
 
@@ -85,6 +91,52 @@ class NeverAiPlanner:
 
 
 class PlannerTests(unittest.TestCase):
+    def test_visualization_registry_covers_every_ready_figure_type(self):
+        catalog = visualization_parameter_catalog()
+        ready = {item["id"] for item in FIGURE_TYPES if item["ready"]}
+        self.assertEqual({item["figure_type"] for item in catalog}, ready)
+        for figure in catalog:
+            parameters = figure["parameters"]
+            self.assertTrue(parameters, figure["figure_type"])
+            keys = [
+                (item["target_kind"], item["parameter"], tuple(item.get("layer_kinds", [])))
+                for item in parameters
+            ]
+            self.assertEqual(len(keys), len(set(keys)), figure["figure_type"])
+
+        scatter = next(
+            item for item in catalog
+            if item["figure_type"] == "compartment_diff_scatter"
+        )
+        scatter_names = {item["parameter"] for item in scatter["parameters"]}
+        self.assertIn("workflow_options.point_size", scatter_names)
+        self.assertIn("workflow_options.width_cm", scatter_names)
+
+    def test_workflow_validation_is_driven_by_the_registry_and_allows_auto_reset(self):
+        names = workflow_parameter_names("tad_diff_stacked")
+        self.assertIn("stable_color", names)
+        self.assertIn("window_mult", names)
+        self.assertEqual(
+            validate_workflow_options(
+                "tad_diff_stacked",
+                {"stable_color": "#123456", "window_mult": 50},
+            ),
+            {"stable_color": "#123456", "window_mult": 50},
+        )
+        with self.assertRaisesRegex(ValueError, "不支持工作流参数"):
+            validate_workflow_options("tad_diff_stacked", {"unknown": 1})
+
+        spec = load_spec()
+        spec["figure_type"] = "hic_multi"
+        spec["workflow_options"] = {"vmin": 2}
+        operation, scientific = ParameterCatalog(spec).compile(ParameterEdit(
+            target_kind="figure",
+            parameter="workflow_options.vmin",
+            value=None,
+        ))
+        self.assertIsNone(operation["value"])
+        self.assertFalse(scientific)
+
     def test_ai_reference_request_is_typed_but_not_allowed_to_supply_coordinates(self):
         output = PlannerOutput(
             action="reference",
@@ -154,6 +206,31 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(result.patch["operations"][0]["field"], "workflow_options.loop_size")
         self.assertNotIn("triangle_ratio", json.dumps(result.patch, ensure_ascii=False))
 
+    def test_compartment_diff_palette_is_exposed_and_applied_locally(self):
+        spec = load_spec()
+        spec["figure_type"] = "compartment_diff_scatter"
+        spec["workflow_options"] = {}
+        parameters = {
+            item["parameter"] for item in ParameterCatalog(spec).model_catalog()
+            if item["target_kind"] == "figure"
+        }
+        expected = {
+            "workflow_options.stable_a_color",
+            "workflow_options.stable_b_color",
+            "workflow_options.a_to_b_color",
+            "workflow_options.b_to_a_color",
+            "workflow_options.control_density_color",
+            "workflow_options.treatment_density_color",
+        }
+        self.assertTrue(expected.issubset(parameters))
+
+        result = RuleFirstPlanner(NeverAiPlanner()).interpret("你推荐一套吧", spec)
+        self.assertEqual(result.action, "patch")
+        self.assertEqual(
+            {operation["field"] for operation in result.patch["operations"]},
+            expected,
+        )
+
     def test_generic_parameter_edit_can_increase_current_value(self):
         output = PlannerOutput(
             action="patch",
@@ -195,7 +272,7 @@ class PlannerTests(unittest.TestCase):
         self.assertNotIn("style.focus_gene", {item["parameter"] for item in genes})
         self.assertNotIn("style.focus_only", {item["parameter"] for item in genes})
 
-    def test_generic_parameter_rejects_unadvertised_path_and_bad_range(self):
+    def test_generic_parameter_rejects_unadvertised_path_and_clamps_visual_range(self):
         with self.assertRaisesRegex(ValueError, "不存在可编辑参数"):
             compile_plan(PlannerOutput(
                 action="patch", reply="任意修改。",
@@ -203,11 +280,21 @@ class PlannerTests(unittest.TestCase):
                     target_kind="layer", target_id="genes_layer", parameter="style.unknown", value=1
                 )],
             ), load_spec())
+        result = compile_plan(PlannerOutput(
+            action="patch", reply="字体超大。",
+            parameter_edits=[ParameterEdit(
+                target_kind="layout", parameter="font_size", value=1000
+            )],
+        ), load_spec())
+        self.assertEqual(result.patch["operations"][0]["value"], 24.0)
+        self.assertIn("请求值 1000", result.reply)
+        self.assertIn("实际应用 24", result.reply)
+
         with self.assertRaisesRegex(ValueError, "不能大于"):
             compile_plan(PlannerOutput(
-                action="patch", reply="字体超大。",
+                action="patch", reply="分辨率超大。",
                 parameter_edits=[ParameterEdit(
-                    target_kind="layout", parameter="font_size", value=1000
+                    target_kind="analysis", parameter="resolution", value=1_000_000_000
                 )],
             ), load_spec())
 
@@ -466,21 +553,36 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(result.planner, "fake:ai")
         self.assertEqual(result.patch["operations"][0]["target_id"], "annotation_panel")
 
-    def test_ai_validation_failure_executes_capable_local_fallback(self):
+    def test_known_font_request_bypasses_ai_and_uses_renderer_parameter(self):
         class InvalidAi:
             def interpret(self, message, spec, history=None):
-                raise ValueError("模型给出的图层 ID 不存在")
+                raise AssertionError("确定的字体请求不应调用 AI")
 
             def status(self):
                 return {"mode": "ai-assisted", "provider": "deepseek", "model": "test"}
 
         spec = load_spec()
-        genes = next(layer for panel in spec["panels"] for layer in panel["layers"] if layer["kind"] == "genes")
-        genes["label"] = "MYC"
-        result = RuleFirstPlanner(InvalidAi()).interpret("MYC这个标签的字体还是太小了", spec)
+        spec["figure_type"] = "compartment_diff_scatter"
+        spec["workflow_options"] = {"font_size": 6}
+        result = RuleFirstPlanner(InvalidAi()).interpret("字体换到2pt", spec)
         self.assertEqual(result.action, "patch")
-        self.assertEqual(result.patch["operations"][0]["field"], "style.fontsize")
-        self.assertIn("未通过安全校验", result.reply)
+        self.assertEqual(result.patch["operations"][0]["field"], "workflow_options.font_size")
+        self.assertEqual(result.patch["operations"][0]["value"], 3.0)
+        self.assertNotIn("安全校验", result.reply)
+
+    def test_ai_validation_failure_reports_exact_parameter_error(self):
+        class InvalidAi:
+            def interpret(self, message, spec, history=None):
+                raise ValueError("patch 动作至少需要一个 edit、parameter_edit 或 capability call。")
+
+            def status(self):
+                return {"mode": "ai-assisted", "provider": "deepseek", "model": "test"}
+
+        result = RuleFirstPlanner(InvalidAi()).interpret("有的标签重叠了", load_spec())
+        self.assertEqual(result.action, "patch")
+        self.assertIn("编辑计划校验未通过", result.reply)
+        self.assertIn("patch 动作至少需要一个", result.reply)
+        self.assertNotIn("安全校验", result.reply)
         self.assertIn("本地能力完成", result.reply)
 
     def test_rule_first_answers_model_identity_without_calling_model(self):

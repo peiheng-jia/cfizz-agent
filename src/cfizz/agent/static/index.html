@@ -4,13 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CFIZZ Agent</title>
-    <link rel="stylesheet" href="/assets/app.css?v=22">
+    <link rel="icon" type="image/png" href="/assets/cfizz-brand-mark.png?v=1">
+    <link rel="stylesheet" href="/assets/app.css?v=42">
 </head>
 <body>
   <main class="workspace">
     <aside class="chat-pane">
       <header class="brand">
-        <div class="mark">CF</div>
+        <div class="mark"><img class="brand-logo" src="/assets/cfizz-brand-mark.png?v=1" alt="" aria-hidden="true"></div>
         <div><h1>CFIZZ Agent</h1><p><span data-i18n="subtitle">对话式 Hi-C 可视化</span> <span id="plannerBadge" class="planner-badge">检测中</span></p></div>
       </header>
       <div class="toolbar">
@@ -24,75 +25,170 @@
         <button id="settingsTab" type="button" aria-selected="false" data-i18n="dataApi">数据与 API</button>
       </nav>
       <section id="settingsPanel" class="sidebar-panel settings-panel" hidden>
-      <details id="workspaceSettings" class="workspace-settings" open>
-        <summary>API 与数据设置 <span id="settingsSummary">本地规则</span></summary>
-        <div class="provider-control">
-          <label for="plannerSelect" data-i18n="dialogueApi">理解模式</label>
-          <select id="plannerSelect" aria-label="选择对话理解 API"></select>
-          <small id="plannerHint" data-i18n="loadingConfig">正在读取配置……</small>
-          <details class="api-config">
-            <summary class="api-config-title"><strong data-i18n="connectAi">API 配置</strong><span data-i18n="memoryOnly">临时保存</span></summary>
-            <form id="apiConfigForm" class="api-config-body" autocomplete="off">
-              <div class="api-config-row">
-                <select id="apiProvider" aria-label="要配置的 API">
-                  <option value="deepseek">DeepSeek</option>
-                  <option value="openai">OpenAI</option>
-                </select>
-                <input id="apiModel" aria-label="模型名称" placeholder="deepseek-chat" spellcheck="false">
-              </div>
-              <div class="api-key-row">
-                <input id="apiKey" type="password" aria-label="API Key" placeholder="输入 API Key" data-i18n-placeholder="apiKeyPlaceholder" autocomplete="new-password" spellcheck="false">
-                <button id="toggleApiKey" type="button" data-i18n="show">显示</button>
-              </div>
-              <div class="api-config-actions">
-                <button id="saveApiConfig" type="submit" class="primary" data-i18n="connectUse">连接并使用</button>
-                <button id="removeApiConfig" type="button" data-i18n="disconnect">断开并清除</button>
-              </div>
-              <small id="apiConfigStatus" data-i18n="keySecretHint">密钥仅保存在内存，服务重启后清除。</small>
-            </form>
-          </details>
-        </div>
-        <form id="dataForm" class="data-form">
-          <label for="dataPath" data-i18n="dataSource">数据源</label>
-          <div><input id="dataPath" placeholder="/data/sample.mcool 或 /data/case1" data-i18n-placeholder="dataPathPlaceholder"><button type="submit" data-i18n="load">加载</button></div>
-          <div class="dataset-options">
-            <input id="datasetGene" value="chr1:0-2Mb" placeholder="基因或范围（如 FOXJ1、chr1:1-2Mb）" data-i18n-placeholder="targetGene">
-            <select id="referenceBuild" aria-label="参考基因组版本"><option value="hg38" data-i18n="humanHg38">人类 hg38 / GRCh38</option></select>
-          </div>
-          <small id="datasetHint" data-i18n="datasetHint">支持单个 .cool/.mcool 或实验目录；扫描目录后可选择参与绘图的文件（默认全选）。</small>
-          <div id="datasetResults" class="dataset-results" hidden>
-            <div id="datasetSummary" data-i18n="combinedWorkflows"></div>
-            <div id="datasetResolution" class="dataset-resolution" hidden>
-              <label for="datasetResolutionSelect" data-i18n="resolutionChoice">共同分辨率</label>
-              <select id="datasetResolutionSelect" aria-label="选择共同分辨率"></select>
-              <small id="datasetResolutionHint"></small>
+        <div id="workspaceSettings" class="workspace-settings compact-workspace">
+          <section class="workspace-overview" aria-labelledby="datasetWorkspaceTitle">
+            <div class="workspace-overview-copy">
+              <span class="section-kicker" data-i18n="workspaceStatus">当前工作区</span>
+              <strong id="datasetWorkspaceTitle" data-i18n="dataWorkspaceEmpty">尚未导入数据</strong>
+              <small id="datasetWorkspaceMeta" data-i18n="dataWorkspaceEmptyHint">导入 .cool/.mcool 文件或实验目录后开始绘图。</small>
             </div>
-            <div id="datasetFiles"></div>
-            <button id="authorizeDataset" type="button" hidden data-i18n="authorizeRetry">授权此目录并重试</button>
-            <input id="datasetUploadInput" type="file" multiple hidden accept=".cool,.mcool,.bw,.bigwig,.gtf,.gff,.gff3,.bed,.bedpe,.tsv,.txt,.npy">
-            <button id="uploadDataset" type="button" hidden data-i18n="uploadSupplement">上传补充文件</button>
-          </div>
-          <label for="figureTypeSelect" data-i18n="figureType">图类型</label>
-          <div><select id="figureTypeSelect" aria-label="选择图类型"></select><button id="applyFigureType" type="button" disabled data-i18n="applyCurrent">应用到当前图</button></div>
-          <small id="figureTypeHint" data-i18n="loadingTypes">正在读取图类型……</small>
-          <div class="dataset-actions">
-            <button id="buildDataset" type="button" class="primary dataset-build" disabled hidden data-i18n="buildSelected">生成所选图形</button>
-            <button id="addTracksDataset" type="button" class="dataset-build secondary" disabled hidden data-i18n="addTracks">添加轨道到当前图</button>
-          </div>
-          <details class="workflow-catalog"><summary data-i18n="workflowCatalog">需要额外结果的 CFIZZ 工作流</summary><div id="workflowCatalog"></div><section id="workflowConfigurator" class="workflow-configurator" hidden></section><small id="workflowActionHint" class="workflow-action-hint" hidden></small></details>
-        </form>
-      </details>
+            <div class="workspace-overview-actions">
+              <button id="openDataDialog" type="button" class="workspace-action primary-soft"><span data-i18n="manageData">导入 / 管理数据</span></button>
+              <button id="openApiDialog" type="button" class="workspace-action"><span data-i18n="dialogueSettings">对话设置</span><small id="settingsSummary">本地规则</small></button>
+            </div>
+          </section>
+
+          <dialog id="apiDialog" class="settings-dialog" aria-labelledby="apiDialogTitle">
+            <div class="dialog-shell">
+              <header class="dialog-header">
+                <div><h2 id="apiDialogTitle" data-i18n="dialogueSettingsTitle">对话理解设置</h2><p data-i18n="dialogueSettingsHint">选择理解模式，或连接 OpenAI / DeepSeek。</p></div>
+                <button type="button" class="dialog-close" data-dialog-close="apiDialog" data-i18n="close">关闭</button>
+              </header>
+              <div class="provider-control">
+                <label for="plannerSelect" data-i18n="dialogueApi">理解模式</label>
+                <select id="plannerSelect" aria-label="选择对话理解 API"></select>
+                <small id="plannerHint" data-i18n="loadingConfig">正在读取配置……</small>
+                <details class="api-config">
+                  <summary class="api-config-title"><strong data-i18n="connectAi">API 配置</strong><span data-i18n="memoryOnly">临时保存</span></summary>
+                  <form id="apiConfigForm" class="api-config-body" autocomplete="off">
+                    <div class="api-config-row">
+                      <select id="apiProvider" aria-label="要配置的 API"><option value="deepseek">DeepSeek</option><option value="openai">OpenAI</option></select>
+                      <input id="apiModel" aria-label="模型名称" placeholder="deepseek-chat" spellcheck="false">
+                    </div>
+                    <div class="api-key-row">
+                      <input id="apiKey" type="password" aria-label="API Key" placeholder="输入 API Key" data-i18n-placeholder="apiKeyPlaceholder" autocomplete="new-password" spellcheck="false">
+                      <button id="toggleApiKey" type="button" data-i18n="show">显示</button>
+                    </div>
+                    <div class="api-config-actions">
+                      <button id="saveApiConfig" type="submit" class="primary" data-i18n="connectUse">连接并使用</button>
+                      <button id="removeApiConfig" type="button" data-i18n="disconnect">断开并清除</button>
+                    </div>
+                    <small id="apiConfigStatus" data-i18n="keySecretHint">密钥仅保存在内存，服务重启后清除。</small>
+                  </form>
+                </details>
+              </div>
+            </div>
+          </dialog>
+
+          <form id="dataForm" class="data-form">
+            <dialog id="dataDialog" class="settings-dialog" aria-labelledby="dataDialogTitle">
+              <div class="dialog-shell">
+                <header class="dialog-header">
+                  <div><h2 id="dataDialogTitle" data-i18n="importDataTitle">导入与管理数据</h2><p data-i18n="importDataHint">添加来源、设置绘图区域，并管理本次使用的数据。</p></div>
+                  <button type="button" class="dialog-close" data-dialog-close="dataDialog" data-i18n="close">关闭</button>
+                </header>
+                <section class="settings-section source-section">
+                  <div class="data-dialog-step"><span>01</span><strong data-i18n="addDataStep">添加数据源</strong></div>
+                  <div class="data-path-row"><input id="dataPath" placeholder="/data/sample.mcool 或 /data/case1" data-i18n-placeholder="dataPathPlaceholder"><button type="submit" data-i18n="load">导入数据源</button></div>
+                  <div class="data-dialog-step region-step"><span>02</span><strong data-i18n="regionSettingsStep">设置绘图范围</strong></div>
+                  <div class="dataset-options">
+                    <div class="dataset-region-control">
+                      <div class="dataset-option-heading">
+                        <label for="datasetGene" data-i18n="drawingRegion">绘图区域</label>
+                        <select id="datasetRegionMode" aria-label="绘图区域选择方式"><option value="auto" data-i18n="regionAuto">自动推荐</option><option value="manual" data-i18n="regionManual">指定区域</option></select>
+                      </div>
+                      <input id="datasetGene" placeholder="由系统根据图类型与所选文件推荐" disabled>
+                      <small id="datasetRegionStatus" class="dataset-region-status" role="status" aria-live="polite">导入数据并选择图类型后，将在这里显示预计范围。</small>
+                    </div>
+                    <div class="reference-build-control">
+                      <label for="referenceBuild" data-i18n="referenceGenome">参考注释</label>
+                      <select id="referenceBuild" aria-label="参考注释来源"><option value="builtin:hg38" data-reference-build="hg38" data-i18n="humanHg38">内置 · hg38 / GRCh38</option></select>
+                      <small id="referenceBuildStatus" class="reference-build-status" role="status" aria-live="polite"></small>
+                    </div>
+                  </div>
+                  <div id="datasetAuthorizationBanner" class="dataset-authorization-banner" role="alert" aria-live="assertive" hidden>
+                    <div class="dataset-authorization-copy"><strong data-i18n="authorizationTitle">需要授权新目录</strong><p id="datasetAuthorizationMessage"></p></div>
+                    <div class="dataset-authorization-actions">
+                      <button id="authorizeDataset" type="button" class="primary" data-i18n="authorizeRetry">授权并重新扫描</button>
+                      <button id="dismissDatasetAuthorization" type="button" data-i18n="authorizationDismiss">暂不处理</button>
+                    </div>
+                  </div>
+                  <small id="datasetHint" data-i18n="datasetHint">支持单个 .cool/.mcool 或实验目录；绘图区域可自动推荐，也可切换后手动指定。</small>
+                  <details id="datasetSourceShelf" class="dataset-source-shelf" hidden open>
+                    <summary class="dataset-source-shelf-header">
+                      <span class="dataset-source-summary-row">
+                        <span class="dataset-source-summary-copy"><strong data-i18n="importedSources">已导入数据源</strong><small data-i18n="sessionOnlySources">可同时勾选多个来源，并在下方统一选择 Hi-C、轨道和注释文件。</small></span>
+                        <span id="datasetSourceCount">0</span>
+                      </span>
+                    </summary>
+                    <div id="datasetSourceList" class="dataset-source-list"></div>
+                  </details>
+                </section>
+                <footer class="dialog-footer data-dialog-footer"><button id="confirmDataDialog" type="button" class="primary" data-dialog-close="dataDialog" data-i18n="done">完成</button></footer>
+              </div>
+            </dialog>
+
+            <section class="figure-settings-section figure-control-dock" aria-labelledby="figureControlTitle">
+              <div class="figure-dock-header">
+                <div class="settings-section-heading">
+                  <span class="settings-step">01</span>
+                  <div class="figure-heading-copy"><label id="figureControlTitle" data-i18n="figureGenerate">图形与生成</label><small data-i18n="figureGenerateCompactHint">选择图形，确认输入后直接生成。</small></div>
+                </div>
+              </div>
+              <div class="figure-dock-main">
+                <button id="openFigureTypeDialog" type="button" class="figure-choice-button">
+                  <span><small data-i18n="selectedFigure">当前图形</small><strong id="figureTypeButtonLabel" data-i18n="selectFigureType">选择图类型</strong></span>
+                  <small id="figureTypeButtonMeta" data-i18n="loadingTypes">正在读取图类型……</small>
+                </button>
+                <button id="buildDataset" type="button" class="primary dataset-build" disabled hidden data-i18n="buildSelected">生成图形</button>
+              </div>
+              <div id="figureReadinessHint" class="figure-readiness-hint" role="status" hidden><span id="figureReadinessMessage"></span><button id="figureReadinessAction" type="button" hidden></button></div>
+              <div class="figure-secondary-actions">
+                <button id="applyFigureType" type="button" disabled hidden data-i18n="applyCurrent">应用到当前图</button>
+                <button id="addTracksDataset" type="button" class="dataset-build secondary" disabled hidden data-i18n="addTracks">添加轨道到当前图</button>
+              </div>
+            </section>
+
+            <dialog id="figureTypeDialog" class="settings-dialog figure-type-dialog" aria-labelledby="figureDialogTitle">
+              <div class="dialog-shell">
+                <header class="dialog-header">
+                  <div><h2 id="figureDialogTitle" data-i18n="figureSelection">选择图形</h2><p data-i18n="figureSelectionHint">先选择基础图形；复杂分析可从下方工作流进入。</p></div>
+                  <button type="button" class="dialog-close" data-dialog-close="figureTypeDialog" data-i18n="close">关闭</button>
+                </header>
+                <div class="figure-dialog-body">
+                  <div class="figure-type-control">
+                    <div class="figure-type-heading-row">
+                      <span class="figure-type-section-label" data-i18n="directFigures">基础图形</span>
+                      <div class="figure-availability-legend" aria-label="图形可用状态">
+                        <span class="ready"><i></i><span data-i18n="figureReady">可生成</span></span>
+                        <span class="missing"><i></i><span data-i18n="figureNeedsData">需补数据</span></span>
+                      </div>
+                    </div>
+                    <select id="figureTypeSelect" aria-label="选择图类型" hidden></select>
+                    <div id="figureTypeChoices" class="figure-type-choices" aria-label="选择基础图形"></div>
+                    <small id="figureTypeHint" data-i18n="loadingTypes">正在读取图类型……</small>
+                  </div>
+                  <details class="workflow-catalog"><summary data-i18n="workflowCatalog">更多 CFIZZ 工作流</summary><div id="workflowCatalog"></div><section id="workflowConfigurator" class="workflow-configurator" hidden></section><small id="workflowActionHint" class="workflow-action-hint" hidden></small></details>
+                </div>
+                <footer class="dialog-footer"><button id="confirmFigureType" type="button" class="primary" data-dialog-close="figureTypeDialog" data-i18n="done">完成</button></footer>
+              </div>
+            </dialog>
+
+            <details id="datasetResults" class="dataset-results" hidden>
+              <summary class="dataset-results-summary"><span><strong data-i18n="inputDetails">绘图输入与分辨率</strong><small id="datasetSummary" data-i18n="inputDetailsHint">需要时展开调整文件和共同分辨率。</small></span><span data-i18n="advanced">高级</span></summary>
+              <div class="dataset-results-body">
+                <div id="datasetResolution" class="dataset-resolution" hidden>
+                  <div class="resolution-copy"><label for="datasetResolutionSelect" data-i18n="resolutionChoice">共同分辨率</label><small id="datasetResolutionHint"></small></div>
+                  <select id="datasetResolutionSelect" aria-label="选择共同分辨率"></select>
+                </div>
+                <div id="datasetFiles"></div>
+                <input id="datasetUploadInput" type="file" multiple hidden accept=".cool,.mcool,.bw,.bigwig,.gtf,.gff,.gff3,.bed,.bedpe,.tsv,.txt,.npy">
+                <button id="uploadDataset" type="button" hidden data-i18n="uploadSupplement">上传补充文件</button>
+              </div>
+            </details>
+          </form>
+        </div>
       </section>
       <section id="chatPanel" class="sidebar-panel conversation-panel">
       <section id="messages" class="messages">
         <article class="message assistant">
-          <span>Agent</span>
-          <p data-i18n="welcomeMessage">载入示例后，可以试试：“有的标签重叠了”“让下面四个 y 轴保持一致”或“把 ATAC normal 改成绿色”。</p>
+          <span>CFIZZ Agent</span>
+          <p data-i18n="welcomeMessage">欢迎使用 CFIZZ Agent。请先导入数据或载入示例开始绘图；生成图形后，可在此调整区域、轨道与样式。</p>
         </article>
       </section>
       <form id="chatForm" class="composer">
-        <textarea id="chatInput" rows="2" placeholder="告诉我你想怎样修改这张图……" data-i18n-placeholder="chatPlaceholder" disabled></textarea>
-        <button type="submit" class="primary" disabled data-i18n="sendDraw">发送并绘图</button>
+        <textarea id="chatInput" rows="2" placeholder="告诉我你想怎样修改这张图……" data-i18n-placeholder="chatPlaceholder"></textarea>
+        <button type="submit" class="primary" data-i18n="sendDraw">发送</button>
         <small data-i18n="enterHint">Enter 发送 · Shift+Enter 换行</small>
       </form>
       </section>
@@ -103,13 +199,14 @@
         <div><p class="eyebrow" data-i18n="currentFigure">CURRENT FIGURE</p><h2 id="figureTitle" data-i18n="noFigure">尚未载入图形</h2></div>
         <div class="figure-actions">
           <button id="historyButton" type="button" class="history-button" disabled><span data-i18n="history">历史版本</span> <span id="historyCount">0</span></button>
+          <span id="previewQuality" class="preview-quality" hidden></span>
           <div class="status"><span id="statusDot"></span><span id="statusText">等待开始</span></div>
         </div>
       </header>
       <div class="figure-stage">
       <div id="canvas" class="canvas empty">
-        <div id="emptyState" class="empty-state"><strong data-i18n="startConversation">从一次对话开始</strong><p data-i18n="emptyHint">右侧会持续显示当前版本，修改不会覆盖历史图。</p></div>
-        <img id="figureImage" alt="CFIZZ rendering preview" hidden>
+        <div id="emptyState" class="empty-state"><img class="empty-brand-mark" src="/assets/cfizz-brand-mark.png?v=1" alt="" aria-hidden="true"><strong data-i18n="startConversation">尚未生成图形</strong><p data-i18n="emptyHint">导入数据或载入示例后，当前图和历史版本将在这里显示。</p></div>
+        <div id="figurePreviewFrame" class="figure-preview-frame" hidden><img id="figureImage" alt="CFIZZ rendering preview" hidden></div>
         <div id="renderOverlay" class="render-overlay" hidden>
           <div class="render-card">
             <div class="spinner" aria-hidden="true"></div>
@@ -129,6 +226,14 @@
         <div><span data-i18n="region">区域</span><strong id="regionLabel">—</strong></div>
         <div><span data-i18n="resolution">分辨率</span><strong id="resolutionLabel">—</strong></div>
         <div><span data-i18n="version">版本</span><strong id="versionLabel">—</strong></div>
+        <div id="figureZoomControl" class="figure-zoom-control" hidden>
+          <label for="figureZoom" data-i18n="previewSize">预览大小</label>
+          <div class="figure-zoom-row">
+            <input id="figureZoom" type="range" min="40" max="200" step="5" value="80">
+            <output id="figureZoomValue" for="figureZoom" aria-live="polite">80%</output>
+            <button id="fitFigure" type="button" data-i18n="fitWindow">适应窗口</button>
+          </div>
+        </div>
         <div class="download-group">
           <a id="svgDownload" class="download disabled" href="#" download><span data-i18n="download">下载</span> SVG</a>
           <a id="pngDownload" class="download disabled" href="#" download><span data-i18n="download">下载</span> PNG</a>
@@ -137,6 +242,6 @@
       </footer>
     </section>
   </main>
-    <script src="/assets/app.js?v=52"></script>
+    <script src="/assets/app.js?v=74"></script>
 </body>
 </html>

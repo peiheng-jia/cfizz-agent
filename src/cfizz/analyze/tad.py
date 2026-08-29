@@ -582,24 +582,43 @@ def load_plot_data_tad(plot_data_file: Path, logger: logging.Logger) -> pd.DataF
     return df
 
 
-def plot_tad_stacked_bar(plot_data: pd.DataFrame, comparison: str, window_mult: int,
-                          output_dir: Path, logger: logging.Logger) -> None:
+def plot_tad_stacked_bar(
+    plot_data: pd.DataFrame,
+    comparison: str,
+    window_mult: int,
+    output_dir: Path,
+    logger: logging.Logger,
+    *,
+    stable_color: str = TAD_COLORS['Stable_boundary'],
+    shift_color: str = TAD_COLORS['Boundary_shift'],
+    unique_color: str = TAD_COLORS['Unique_boundary'],
+    width_cm: float = 6.4,
+    height_cm: float = 5,
+    font_size: float = 5,
+    bar_width: float = 0.8,
+    show_counts: bool = True,
+    dpi: int = 300,
+) -> None:
     """
     绘制TAD边界分类堆积柱状图。
     Source: a_5 L467
     """
     logger.info(f"\n生成 {comparison} ({window_mult}b) 堆积柱状图...")
     
-    width_cm, height_cm = 6.4, 5
     fig, ax = plt.subplots(figsize=(width_cm / 2.54, height_cm / 2.54))
     
     views = plot_data['view'].tolist()
     n_views = len(views)
     x_positions = np.arange(n_views)
-    width = 0.8
+    width = bar_width
     
     categories = ['Stable_boundary', 'Boundary_shift', 'Unique_boundary']
     category_labels = ['stable (unchanged)', 'unique (boundary shift)', 'unique (lost and gain)']
+    colors = {
+        'Stable_boundary': stable_color,
+        'Boundary_shift': shift_color,
+        'Unique_boundary': unique_color,
+    }
     
     bottom = np.zeros(n_views)
     
@@ -607,23 +626,25 @@ def plot_tad_stacked_bar(plot_data: pd.DataFrame, comparison: str, window_mult: 
         pct_values = plot_data[f'{cat}_pct'].tolist()
         count_values = plot_data[cat].tolist()
         
-        bars = ax.bar(x_positions, pct_values, width, bottom=bottom, label=category_labels[i], color=TAD_COLORS[cat])
+        bars = ax.bar(x_positions, pct_values, width, bottom=bottom, label=category_labels[i], color=colors[cat])
         
         for j, (bar, pct_val, count_val) in enumerate(zip(bars, pct_values, count_values)):
-            if pct_val > 1:
+            if show_counts and pct_val > 1:
                 height = bar.get_height()
                 y_pos = bottom[j] + height / 2
                 ax.text(bar.get_x() + bar.get_width()/2, y_pos, f'{pct_val:.1f}%({int(count_val)})',
-                       ha='center', va='center', fontsize=5, color='black')
+                       ha='center', va='center', fontsize=font_size, color='black')
         
         bottom = [b + p for b, p in zip(bottom, pct_values)]
     
-    ax.set_xlabel('Sample')
-    ax.set_ylabel('Percentage (%)')
+    ax.set_xlabel('Sample', fontsize=font_size)
+    ax.set_ylabel('Percentage (%)', fontsize=font_size)
     ax.set_xticks(x_positions)
-    ax.set_xticklabels(views)
+    ax.set_xticklabels(views, fontsize=font_size)
+    ax.tick_params(axis='y', labelsize=font_size)
     ax.set_ylim(0, 100)
-    ax.legend(title='boundary change', loc=(1.01, 0.6), frameon=False)
+    ax.legend(title='boundary change', loc=(1.01, 0.6), frameon=False,
+              fontsize=font_size, title_fontsize=font_size)
     ax.grid(axis='y', alpha=0.3, linestyle='--')
     ax.set_axisbelow(True)
     
@@ -634,7 +655,7 @@ def plot_tad_stacked_bar(plot_data: pd.DataFrame, comparison: str, window_mult: 
     output_svg = output_dir / f"tad_{comparison_clean}_{window_mult}b_stacked_bar.svg"
     output_pdf = output_dir / f"tad_{comparison_clean}_{window_mult}b_stacked_bar.pdf"
     
-    plt.savefig(output_png, dpi=300, bbox_inches='tight')
+    plt.savefig(output_png, dpi=dpi, bbox_inches='tight')
     plt.savefig(output_svg, format='svg', bbox_inches='tight')
     plt.savefig(output_pdf, format='pdf', bbox_inches='tight')
     plt.close()
@@ -670,7 +691,13 @@ def generate_analysis_report_tad(paired_df1_final: pd.DataFrame, paired_df2_fina
 
 def analyze_single_comparison_window(comparison: str, window_mult: int, output_root: str, run_mode: str,
                                      treatment_boundaries_path: str = None, control_boundaries_path: str = None,
-                                     treatment_name: str = None, control_name: str = None) -> None:
+                                     treatment_name: str = None, control_name: str = None,
+                                     stable_color: str = TAD_COLORS['Stable_boundary'],
+                                     shift_color: str = TAD_COLORS['Boundary_shift'],
+                                     unique_color: str = TAD_COLORS['Unique_boundary'],
+                                     width_cm: float = 6.4, height_cm: float = 5,
+                                     font_size: float = 5, bar_width: float = 0.8,
+                                     show_counts: bool = True, dpi: int = 300) -> None:
     """
     分析单个比较组的单个窗口。
     Source: a_5 L559
@@ -763,7 +790,13 @@ def analyze_single_comparison_window(comparison: str, window_mult: int, output_r
                 return
             
             plot_data = load_plot_data_tad(plot_data_file, logger)
-            plot_tad_stacked_bar(plot_data, comparison_clean, window_mult, output_path, logger)
+            plot_tad_stacked_bar(
+                plot_data, comparison_clean, window_mult, output_path, logger,
+                stable_color=stable_color, shift_color=shift_color,
+                unique_color=unique_color, width_cm=width_cm,
+                height_cm=height_cm, font_size=font_size,
+                bar_width=bar_width, show_counts=show_counts, dpi=dpi,
+            )
         
         logger.info("\n" + "=" * 70)
         logger.info(f"分析完成！")

@@ -188,7 +188,10 @@ class OpenAIPlanner:
         }
         if validation_feedback:
             payload["previous_plan_error"] = validation_feedback
-            payload["repair_instruction"] = "修正上一份计划并重新输出；只能使用目录中真实存在的参数和目标。"
+            payload["repair_instruction"] = (
+                "根据 previous_plan_error 修正上一份计划并重新输出；只能使用目录中真实存在的参数和目标。"
+                "如果 action=patch，必须提供至少一个具体 edit、parameter_edit 或 capability call，且 reply 必须与实际参数值一致。"
+            )
         return self.client.responses.parse(
             model=self.model,
             input=[
@@ -256,7 +259,10 @@ class DeepSeekPlanner(OpenAIPlanner):
         }
         if validation_feedback:
             payload["previous_plan_error"] = validation_feedback
-            payload["repair_instruction"] = "修正上一份计划并重新输出；只能使用目录中真实存在的参数和目标。"
+            payload["repair_instruction"] = (
+                "根据 previous_plan_error 修正上一份计划并重新输出；只能使用目录中真实存在的参数和目标。"
+                "如果 action=patch，必须提供至少一个具体 edit、parameter_edit 或 capability call，且 reply 必须与实际参数值一致。"
+            )
         return self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -340,7 +346,35 @@ class RuleFirstPlanner:
             and bool(local.patch)
             and any(operation.get("op") == "move_layer" for operation in local.patch.get("operations", []))
         )
-        return (compact in exact_commands and local.action in {"undo", "redo", "render"}) or assay_axis_request or track_order_request
+        workflow_palette_request = (
+            local.action == "patch"
+            and bool(local.patch)
+            and any(
+                operation.get("target_kind") == "figure"
+                and str(operation.get("field", "")).startswith("workflow_options.")
+                and str(operation.get("field", "")).endswith("_color")
+                for operation in local.patch.get("operations", [])
+            )
+        )
+        deterministic_font_request = (
+            local.action == "patch"
+            and bool(local.patch)
+            and bool(local.patch.get("operations"))
+            and all(
+                operation.get("op") == "update"
+                and operation.get("field") in {
+                    "font_size", "workflow_options.font_size", "style.fontsize",
+                }
+                for operation in local.patch.get("operations", [])
+            )
+        )
+        return (
+            (compact in exact_commands and local.action in {"undo", "redo", "render"})
+            or assay_axis_request
+            or track_order_request
+            or workflow_palette_request
+            or deterministic_font_request
+        )
 
     def _fallback(self, local: IntentResult, exc: Exception) -> IntentResult:
         status = self.ai_planner.status()
@@ -593,7 +627,7 @@ def _planner_failure_reason(exc: Exception) -> str:
     if isinstance(exc, ValueError) and any(token in message for token in ("解析", "json", "schema")):
         return "返回格式未通过解析"
     if isinstance(exc, ValueError):
-        return "返回的编辑计划未通过安全校验"
+        return f"编辑计划校验未通过：{_repair_feedback(exc)}"
     return "调用异常"
 
 
@@ -651,24 +685,31 @@ def compile_plan(output: PlannerOutput, spec: Dict[str, Any], planner: str = "ai
     layer_kinds = {layer.get("id"): layer.get("kind") for layer in layers}
     operations = []
     scientific = False
+    adjustment_notes: List[str] = []
     for edit in output.edits:
         operation, is_scientific = _compile_edit(edit, panel_ids, layer_ids, layer_kinds)
         operations.extend(operation)
         scientific = scientific or is_scientific
     parameter_catalog = ParameterCatalog(spec)
     for edit in output.parameter_edits:
-        operation, is_scientific = parameter_catalog.compile(edit)
+        normalized_edit, adjustment = parameter_catalog.normalize_visual_edit(edit)
+        operation, is_scientific = parameter_catalog.compile(normalized_edit)
         operations.append(operation)
         scientific = scientific or is_scientific
+        if adjustment:
+            adjustment_notes.append(adjustment)
     registry = CapabilityRegistry()
     for call in output.calls:
         compiled = registry.compile(call, spec)
         operations.extend(compiled.operations)
         scientific = scientific or compiled.requires_confirmation
+    reply = output.reply
+    if adjustment_notes:
+        reply = "；".join(adjustment_notes) + "。"
     return IntentResult(
         "patch",
-        output.reply,
-        {"summary": output.reply[:160], "operations": operations},
+        reply,
+        {"summary": reply[:160], "operations": operations},
         requires_confirmation=scientific,
         planner=planner,
     )
@@ -786,7 +827,7 @@ _SYSTEM_PROMPT = """你是 CFIZZ 科研图形规划器。把用户请求转换�
 14. recent_dialogue 是最近几轮脱敏对话。对于“还有呢”“除了这个呢”“换一个”“再浅一点”等省略表达，先结合 recent_dialogue 和 current_figure 恢复指代；只有仍存在多个合理目标时才追问。
 15. 区分询问与执行：用户询问“还能做什么/还有哪些/除了这个呢”时用 answer；只有明确要求改变当前图时才用 patch。
 16. 先理解整句意图，不要因为句中出现基因名或轨道名就改变区域。比如“MYC 标签重叠、看不清”是当前基因轨道的版式问题，应通过 editable_parameters 调整 genes 图层真实的 layer.height_cm；不要修改不会传给渲染器的注释面板高度。只有用户明确说“定位、跳转、切换到某基因附近”时才修改 viewport。
-17. 用户只要求某个轨道或基因标签的字体时，使用 set_layer_font_size 并填写真实 layer ID；只有明确要求整张图文字变化时才使用 set_figure_font_size。
+17. 用户只要求某个轨道或基因标签的字体时，优先使用 editable_parameters 中该真实 layer ID 的 style.fontsize；要求整张图文字变化时，逐字选择目录中真实存在的 font_size 参数。多样本/工作流图通常使用 figure.workflow_options.font_size，不能改成不会传给该渲染器的 layout.font_size。
 18. “最右侧标签截断、色标文字显示不全”通常是右侧留白不足，使用 set_layout_right_margin；左侧被裁切则使用 set_layout_left_margin。根据当前 margin 增加合理空间，不要修改数据区域。
 19. editable_parameters 含当前值、类型、范围和允许操作。对“再大一点/再小一点/隐藏/显示/换颜色/增加留白”等请求，直接使用通用 parameter_edits；不要因为没有专用 edit_type 而拒绝。
 20. 单基因注释轨道的数据源已经按 CFIZZ 示例预先提取为单基因 GTF。“只显示 MYC 基因”不需要隐藏任何图层；若当前基因轨道标签已经是 MYC，直接用 answer 说明已满足。必须保留 Hi-C 图层。
@@ -796,4 +837,5 @@ _SYSTEM_PROMPT = """你是 CFIZZ 科研图形规划器。把用户请求转换�
 24. 用户要求创建 available_visualizations 中 selection_mode=conversation 的图时，使用 action=workflow 并逐字填写该条目的 figure_type；source_ids 只能从 current_figure.data_sources 的真实 ID 中选择，options 只填写用户明确给出的科学参数。不要用普通 patch 假装已经完成。服务端会核对当前数据源并绑定正式 CFIZZ entrypoint，缺少数据时会明确向用户索取。
 25. 多样本工作流的正式参数位于 editable_parameters 中的 figure.workflow_options.*。Loop 圈/标记“太大、太小”只能修改 loop_multi/loop_diff_region 的 workflow_options.loop_size（或单样本 loop_heatmap 图层的 style.loop_size），绝不能用 triangle_ratio 代替；triangle_ratio 只表示三角热图高度。Loop 颜色和透明度分别使用 loop_color、loop_alpha。TAD 的 window_size 是 insulation 计算窗口，compartment 的 bar_height_ratio 是 E1 轨道高度；不要把这些参数互相替代。
 26. 用户说“缩小 Loop 圈”时，缩小的是 CFIZZ marker 的大小，不是热图、面板或三角形的高度；相对修改必须基于目录中的 current_value 生成合理的新值，并在 reply 中说明实际修改的参数名和前后值。涉及 window、flank、n_bins、contact_type 等科学计算参数时，说明会重新计算并等待服务端确认。
+27. action=patch 时至少提供一个 edit、parameter_edit 或 capability call。参数值必须遵守 editable_parameters 的类型与范围；若用户请求的纯视觉数值越界，使用最接近的合法值，并在 reply 中明确“请求值”和“实际应用值”，reply 必须与结构化参数一致。
 """

@@ -835,12 +835,40 @@ def load_plot_data(plot_data_file: Path, logger: logging.Logger) -> pd.DataFrame
     return df
 
 
-def plot_compartment_scatter(df: pd.DataFrame, treatment_name: str, comparison: str,
-                             output_dir: Path, logger: logging.Logger) -> None:
+def plot_compartment_scatter(
+    df: pd.DataFrame,
+    treatment_name: str,
+    comparison: str,
+    output_dir: Path,
+    logger: logging.Logger,
+    *,
+    stable_a_color: str = COMPARTMENT_COLORS['Stable_A'],
+    stable_b_color: str = COMPARTMENT_COLORS['Stable_B'],
+    a_to_b_color: str = COMPARTMENT_COLORS['A_to_B'],
+    b_to_a_color: str = COMPARTMENT_COLORS['B_to_A'],
+    control_density_color: str = COLOR_PALETTE[2],
+    treatment_density_color: str = COLOR_PALETTE[5],
+    point_size: float = 1,
+    point_alpha: float = 0.5,
+    density_alpha: float = 0.5,
+    density_line_width: float = 0.5,
+    width_cm: float = 8,
+    height_cm: float = 6.4,
+    font_size: float = 7,
+    show_counts: bool = True,
+    dpi: int = 600,
+) -> None:
     """绘制compartment差异散点图（带边缘分布） (a_4 L271-359)"""
     logger.info(f"\n生成 {comparison} 散点图...")
 
-    figure = plt.figure(figsize=(8 * CM, 6.4 * CM), dpi=600)
+    compartment_colors = {
+        'Stable_A': stable_a_color,
+        'Stable_B': stable_b_color,
+        'A_to_B': a_to_b_color,
+        'B_to_A': b_to_a_color,
+    }
+
+    figure = plt.figure(figsize=(width_cm * CM, height_cm * CM), dpi=dpi)
     figure.subplots_adjust(left=0.2, bottom=0.2, right=0.8, top=0.95, wspace=0.1, hspace=0.1)
 
     grid = plt.GridSpec(6, 6, wspace=0.05, hspace=0.05, figure=figure)
@@ -855,57 +883,62 @@ def plot_compartment_scatter(df: pd.DataFrame, treatment_name: str, comparison: 
     bottom_value = top_value * 0.1 * -1
     bottom_value = bottom_value if bottom_value < -1.5 else -1.5
 
-    sns.kdeplot(data=df, x='E1_control', color=COLOR_PALETTE[2], fill=True,
-                common_norm=False, legend=False, alpha=0.5, linewidth=0.5, cut=0, ax=ax1)
-    sns.kdeplot(data=df, y=f'E1_{treatment_name}', color=COLOR_PALETTE[5], fill=True,
-                common_norm=False, legend=False, alpha=0.5, linewidth=0.5, cut=0, ax=ax2)
+    sns.kdeplot(data=df, x='E1_control', color=control_density_color, fill=True,
+                common_norm=False, legend=False, alpha=density_alpha,
+                linewidth=density_line_width, cut=0, ax=ax1)
+    sns.kdeplot(data=df, y=f'E1_{treatment_name}', color=treatment_density_color, fill=True,
+                common_norm=False, legend=False, alpha=density_alpha,
+                linewidth=density_line_width, cut=0, ax=ax2)
 
     x_line = np.linspace(bottom_value, top_value, 1000)
     plt.plot(x_line, x_line, color="#bbbbbb", linewidth=0.1)
 
     change_col = f'compartment_change_{treatment_name}'
-    for status, color in COMPARTMENT_COLORS.items():
+    for status, color in compartment_colors.items():
         subset = df[df[change_col] == status]
         if len(subset) > 0:
             ax3.scatter(x=subset['E1_control'], y=subset[f'E1_{treatment_name}'],
-                       s=1, alpha=0.5, color=color, edgecolors=color, linewidths=0.5)
+                       s=point_size, alpha=point_alpha, color=color,
+                       edgecolors=color, linewidths=0.5)
 
     total = len(df)
 
     legend_elements = []
-    for status, color in COMPARTMENT_COLORS.items():
+    for status, color in compartment_colors.items():
         count = len(df[df[change_col] == status])
         if count > 0:
             pct = count / total * 100
+            label = f'{status}\nn={count:,}\n({pct:.1f}%)\n' if show_counts else status
             legend_elements.append(mlines.Line2D([0], [0], marker='o', color='w',
                                               markerfacecolor=color, markersize=4,
-                                              label=f'{status}\nn={count:,}\n({pct:.1f}%)\n'))
+                                              label=label))
 
     if legend_elements:
-        ax2.legend(handles=legend_elements, prop=FONT_CONFIG, labelspacing=0.4,
+        legend_font = {**FONT_CONFIG, 'size': max(3, font_size - 2)}
+        ax2.legend(handles=legend_elements, prop=legend_font, labelspacing=0.4,
                   handleheight=1.5, handletextpad=0.2, loc=(1.01,0.3),
                   frameon=False, title='')
 
     ax1.spines[:].set_linewidth(0)
-    ax1.tick_params(width=0.6, length=2.5, labelsize=6)
+    ax1.tick_params(width=0.6, length=2.5, labelsize=max(3, font_size - 1))
     ax1.set_xticks([])
     ax1.set_xlabel("")
     ax1.set_yticks([])
     ax1.set_ylabel("")
 
     ax2.spines[:].set_linewidth(0)
-    ax2.tick_params(width=0.6, length=2.5, labelsize=6)
+    ax2.tick_params(width=0.6, length=2.5, labelsize=max(3, font_size - 1))
     ax2.set_xticks([])
     ax2.set_xlabel("")
     ax2.set_yticks([])
     ax2.set_ylabel("")
 
     ax3.spines[:].set_linewidth(0.4)
-    ax3.tick_params(width=0.6, length=2.5, labelsize=7)
+    ax3.tick_params(width=0.6, length=2.5, labelsize=font_size)
 
     _, control_name = parse_comparison_func(comparison)
-    ax3.set_xlabel(f'Compartment of {control_name}', fontsize=7, x=0.55)
-    ax3.set_ylabel(f'Compartment of {treatment_name}', fontsize=7, y=0.55)
+    ax3.set_xlabel(f'Compartment of {control_name}', fontsize=font_size, x=0.55)
+    ax3.set_ylabel(f'Compartment of {treatment_name}', fontsize=font_size, y=0.55)
 
     ax1.set_xlim(bottom_value, top_value)
     ax2.set_ylim(bottom_value, top_value)
@@ -920,7 +953,7 @@ def plot_compartment_scatter(df: pd.DataFrame, treatment_name: str, comparison: 
     output_png = output_dir / f"compartment_{comparison}_scatter.png"
 
     figure.savefig(output_svg, format='svg')
-    figure.savefig(output_png, format='png', dpi=600)
+    figure.savefig(output_png, format='png', dpi=dpi)
     figure.savefig(output_pdf, format='pdf')
     plt.close()
 
@@ -1018,7 +1051,22 @@ def analyze_single_comparison(
     output_root: str, 
     run_mode: str,
     control_e1_path: str = None,
-    treatment_e1_path: str = None
+    treatment_e1_path: str = None,
+    stable_a_color: str = COMPARTMENT_COLORS['Stable_A'],
+    stable_b_color: str = COMPARTMENT_COLORS['Stable_B'],
+    a_to_b_color: str = COMPARTMENT_COLORS['A_to_B'],
+    b_to_a_color: str = COMPARTMENT_COLORS['B_to_A'],
+    control_density_color: str = COLOR_PALETTE[2],
+    treatment_density_color: str = COLOR_PALETTE[5],
+    point_size: float = 1,
+    point_alpha: float = 0.5,
+    density_alpha: float = 0.5,
+    density_line_width: float = 0.5,
+    width_cm: float = 8,
+    height_cm: float = 6.4,
+    font_size: float = 7,
+    show_counts: bool = True,
+    dpi: int = 600,
 ):
     """
     分析单个比较组的Compartment差异。
@@ -1131,7 +1179,28 @@ def analyze_single_comparison(
                 return
             
             df_plot = load_plot_data(plot_data_file, logger)
-            plot_compartment_scatter(df_plot, treatment, comparison, output_path, logger)
+            plot_compartment_scatter(
+                df_plot,
+                treatment,
+                comparison,
+                output_path,
+                logger,
+                stable_a_color=stable_a_color,
+                stable_b_color=stable_b_color,
+                a_to_b_color=a_to_b_color,
+                b_to_a_color=b_to_a_color,
+                control_density_color=control_density_color,
+                treatment_density_color=treatment_density_color,
+                point_size=point_size,
+                point_alpha=point_alpha,
+                density_alpha=density_alpha,
+                density_line_width=density_line_width,
+                width_cm=width_cm,
+                height_cm=height_cm,
+                font_size=font_size,
+                show_counts=show_counts,
+                dpi=dpi,
+            )
         
         logger.info("\n" + "=" * 70)
         logger.info(f"分析完成！")

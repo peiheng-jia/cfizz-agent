@@ -73,4 +73,4 @@ exclude = ["examples*", "demo*", "tests*", "scripts*", "docs*", "build*", "dist*
 [tool.setuptools.package-data]
 "cfizz" = ["*.md"]
 "cfizz.preprocessing" = ["*.sh", "*.py", "*.md"]
-"cfizz.agent" = ["capabilities.json", "static/*.html", "static/*.css", "static/*.js"]
+"cfizz.agent" = ["capabilities.json", "static/*.html", "static/*.css", "static/*.js", "static/*.png"]

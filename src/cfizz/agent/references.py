@@ -61,6 +61,33 @@ _BUILTIN_GENES = {
     },
 }
 
+_REFERENCE_BUILDS: Dict[str, Dict[str, Any]] = {
+    "hg38": {
+        "species": "human",
+        "assembly": "GRCh38",
+        "annotation": "Ensembl 110 / GRCh38.p14",
+        "chromosome_count": 24,
+    },
+    "hg19": {
+        "species": "human",
+        "assembly": "GRCh37",
+        "annotation": "坐标绘图可用；基因名称定位需提供匹配的 GTF/GFF",
+        "chromosome_count": 24,
+    },
+    "mm10": {
+        "species": "mouse",
+        "assembly": "GRCm38",
+        "annotation": "坐标绘图可用；基因名称定位需提供匹配的 GTF/GFF",
+        "chromosome_count": 21,
+    },
+    "mm39": {
+        "species": "mouse",
+        "assembly": "GRCm39",
+        "annotation": "坐标绘图可用；基因名称定位需提供匹配的 GTF/GFF",
+        "chromosome_count": 21,
+    },
+}
+
 _HG38_CHROMS = {
     "chr1": 248_956_422, "chr2": 242_193_529, "chr3": 198_295_559,
     "chr4": 190_214_555, "chr5": 181_538_259, "chr6": 170_805_979,
@@ -79,16 +106,32 @@ class ReferenceRegistry:
     def __init__(self, project_root: str | Path, cache_root: Optional[str | Path] = None):
         self.project_root = Path(project_root).expanduser().resolve()
         self.cache_root = Path(cache_root or self.project_root / "agent_runtime" / "reference_cache").expanduser().resolve()
-        self._gene_index: Optional[Dict[str, Any]] = None
+        self._gene_indexes: Dict[str, Optional[Dict[str, Any]]] = {}
         self._index_lock = threading.RLock()
 
     def catalog(self) -> list[Dict[str, Any]]:
-        return [self._build("hg38").to_dict()]
+        """Return only references that are genuinely installed and usable.
+
+        Coordinate aliases remain known internally so imported annotations can
+        be handled safely, but an assembly must have a complete local GTF/GFF
+        and index before it is advertised as a built-in reference in the UI.
+        """
+        references = [self._build(build) for build in _REFERENCE_BUILDS]
+        return [reference.to_dict() for reference in references if reference.complete_annotation]
+
+    @staticmethod
+    def _definition(build: str) -> Dict[str, Any]:
+        definition = _REFERENCE_BUILDS.get(str(build))
+        if definition is None:
+            supported = "、".join(_REFERENCE_BUILDS)
+            raise ValueError(f"不支持参考基因组 {build}；当前可选：{supported}。")
+        return definition
 
     def bundled_gene_names(self, build: str = "hg38") -> list[str]:
         """Return genes for which this project ships a small GTF annotation."""
+        self._definition(build)
         if build != "hg38":
-            raise ValueError("当前内置参考版本为 hg38/GRCh38。")
+            return []
         names = set(_BUILTIN_GENES.get(build, {}))
         for directory in (self.project_root / "demo" / "data", self.project_root / "data"):
             if not directory.is_dir():
@@ -98,17 +141,16 @@ class ReferenceRegistry:
         return sorted(names)
 
     def _build(self, build: str) -> ReferenceBuild:
-        if build != "hg38":
-            raise ValueError("当前内置参考版本为 hg38/GRCh38。")
-        annotation = self._bundled_annotation("FOXJ1")
-        complete = self._complete_annotation()
-        index = self._load_gene_index()
+        definition = self._definition(build)
+        annotation = self._bundled_annotation("FOXJ1", build)
+        complete = self._complete_annotation(build)
+        index = self._load_gene_index(build)
         return ReferenceBuild(
-            id="hg38",
-            species="human",
-            assembly="GRCh38",
-            annotation="项目级 Ensembl 110 / GRCh38.p14 完整基因注释",
-            chromosome_count=len(_HG38_CHROMS),
+            id=build,
+            species=str(definition["species"]),
+            assembly=str(definition["assembly"]),
+            annotation=str(definition["annotation"]),
+            chromosome_count=int(definition["chromosome_count"]),
             bundled_annotation=str(annotation) if annotation else None,
             bundled_genes=tuple(self.bundled_gene_names(build)),
             complete_annotation=str(complete) if complete else None,
@@ -125,13 +167,12 @@ class ReferenceRegistry:
         name = str(gene).strip().upper()
         if not name:
             return None
-        if build not in _BUILTIN_GENES:
-            raise ValueError("当前内置参考版本为 hg38/GRCh38。")
+        self._definition(build)
 
         candidates: list[Path] = []
         if annotation_path:
             candidates.append(Path(annotation_path).expanduser().resolve())
-        bundled = self._bundled_annotation(name)
+        bundled = self._bundled_annotation(name, build)
         if bundled:
             candidates.append(bundled)
         for path in candidates:
@@ -139,9 +180,9 @@ class ReferenceRegistry:
             if location:
                 return location
 
-        index = self._load_gene_index()
+        index = self._load_gene_index(build)
         record = index.get("aliases", {}).get(name) if index else None
-        complete = self._complete_annotation()
+        complete = self._complete_annotation(build)
         if record and complete:
             return GeneLocation(
                 str(record.get("gene") or name),
@@ -153,36 +194,32 @@ class ReferenceRegistry:
                 str(complete),
             )
 
-        fallback = _BUILTIN_GENES[build].get(name)
+        fallback = _BUILTIN_GENES.get(build, {}).get(name)
         if fallback:
             chrom, start, end = fallback
             return GeneLocation(name, build, chrom, start, end, "内置坐标（请用完整 GTF 校验转录本）")
         return None
 
     def chromosome_sizes(self, build: str = "hg38") -> Dict[str, int]:
-        if build != "hg38":
-            raise ValueError("当前内置参考版本为 hg38/GRCh38。")
-        return dict(_HG38_CHROMS)
+        self._definition(build)
+        return dict(_HG38_CHROMS) if build == "hg38" else {}
 
     def has_complete_annotation(self, build: str = "hg38") -> bool:
-        if build != "hg38":
-            return False
-        return self._complete_annotation() is not None and self._load_gene_index() is not None
+        self._definition(build)
+        return self._complete_annotation(build) is not None and self._load_gene_index(build) is not None
 
     def complete_gene_count(self, build: str = "hg38") -> int:
-        if build != "hg38":
-            return 0
-        index = self._load_gene_index()
+        self._definition(build)
+        index = self._load_gene_index(build)
         return int(index.get("gene_records", 0)) if index else 0
 
     def suggest_genes(self, query: str, build: str = "hg38", limit: int = 5) -> list[str]:
         """Suggest authoritative symbols for a mistyped gene without guessing coordinates."""
-        if build != "hg38":
-            return []
+        self._definition(build)
         wanted = str(query).strip().upper()
         if not wanted:
             return []
-        index = self._load_gene_index() or {}
+        index = self._load_gene_index(build) or {}
         names = sorted({
             str(record.get("gene") or "").upper()
             for record in index.get("aliases", {}).values()
@@ -208,14 +245,15 @@ class ReferenceRegistry:
         source = Path(location.annotation_path).resolve() if location.annotation_path else None
         if source is not None and source.stem.upper() == location.gene.upper() and source.suffix.lower() in {".gtf", ".gff", ".gff3"}:
             return str(source)
-        full = self._complete_annotation()
+        build = location.assembly if location.assembly in _REFERENCE_BUILDS else "hg38"
+        full = self._complete_annotation(build)
         if full is None:
             if source is None:
                 raise ValueError(f"{location.gene} 没有可用的注释文件。")
             return str(source)
 
         safe_gene = re.sub(r"[^A-Za-z0-9_.-]", "_", location.gene.upper())
-        cache_path = self.cache_root / "hg38" / "genes" / f"{safe_gene}.gtf"
+        cache_path = self.cache_root / build / "genes" / f"{safe_gene}.gtf"
         if cache_path.is_file() and cache_path.stat().st_size > 0:
             return str(cache_path)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -242,7 +280,7 @@ class ReferenceRegistry:
         file_descriptor, temporary_name = tempfile.mkstemp(prefix=".region_", suffix=".gtf", dir=cache_path.parent)
         try:
             with open(file_descriptor, "w", encoding="utf-8", closefd=True) as handle:
-                handle.write(f"# Ensembl 110 / GRCh38.p14 · {location.gene}\n")
+                handle.write(f"# {self._definition(build)['assembly']} · {location.gene}\n")
                 handle.write("\n".join(lines))
                 handle.write("\n")
             Path(temporary_name).replace(cache_path)
@@ -272,15 +310,14 @@ class ReferenceRegistry:
 
     def region_annotation_track(self, chrom: str, start: int, end: int, build: str = "hg38") -> str:
         """Extract every GTF record overlapping a viewport for CFIZZ's GTF track."""
-        if build != "hg38":
-            raise ValueError("当前内置参考版本为 hg38/GRCh38。")
-        full = self._complete_annotation()
+        self._definition(build)
+        full = self._complete_annotation(build)
         if full is None:
-            raise ValueError("项目中没有可用的完整 hg38 GTF，无法绘制区域内全部基因。")
+            raise ValueError(f"项目中没有可用的完整 {build} GTF，无法绘制区域内全部基因；请导入匹配版本的 GTF/GFF。")
         if start < 0 or end <= start:
             raise ValueError("基因注释区域无效。")
         safe_chrom = re.sub(r"[^A-Za-z0-9_.-]", "_", chrom)
-        cache_path = self.cache_root / "hg38" / "regions" / f"{safe_chrom}_{start}_{end}.gtf"
+        cache_path = self.cache_root / build / "regions" / f"{safe_chrom}_{start}_{end}.gtf"
         if cache_path.is_file() and cache_path.stat().st_size > 0:
             return str(cache_path)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -298,7 +335,7 @@ class ReferenceRegistry:
         file_descriptor, temporary_name = tempfile.mkstemp(prefix=".region_", suffix=".gtf", dir=cache_path.parent)
         try:
             with open(file_descriptor, "w", encoding="utf-8", closefd=True) as handle:
-                handle.write(f"# Ensembl 110 / GRCh38.p14 · {chrom}:{start}-{end}\n")
+                handle.write(f"# {self._definition(build)['assembly']} · {chrom}:{start}-{end}\n")
                 handle.write("\n".join(lines))
                 handle.write("\n")
             Path(temporary_name).replace(cache_path)
@@ -308,26 +345,33 @@ class ReferenceRegistry:
                 temporary.unlink()
         return str(cache_path)
 
-    def _complete_annotation(self) -> Optional[Path]:
+    def _complete_annotation(self, build: str = "hg38") -> Optional[Path]:
+        if build != "hg38":
+            return None
         path = self.project_root / "references" / "hg38" / "Homo_sapiens.GRCh38.110.add_chr.sorted.gtf.gz"
         tabix = Path(str(path) + ".tbi")
         return path if path.is_file() and tabix.is_file() else None
 
-    def _load_gene_index(self) -> Optional[Dict[str, Any]]:
+    def _load_gene_index(self, build: str = "hg38") -> Optional[Dict[str, Any]]:
+        if build != "hg38":
+            return None
         with self._index_lock:
-            if self._gene_index is not None:
-                return self._gene_index
+            if build in self._gene_indexes:
+                return self._gene_indexes[build]
             path = self.project_root / "references" / "hg38" / "gene_index.json.gz"
             if not path.is_file():
                 return None
             try:
                 with gzip.open(path, "rt", encoding="utf-8") as handle:
-                    self._gene_index = json.load(handle)
+                    self._gene_indexes[build] = json.load(handle)
             except (OSError, UnicodeError, json.JSONDecodeError):
+                self._gene_indexes[build] = None
                 return None
-            return self._gene_index
+            return self._gene_indexes[build]
 
-    def _bundled_annotation(self, gene: str) -> Optional[Path]:
+    def _bundled_annotation(self, gene: str, build: str = "hg38") -> Optional[Path]:
+        if build != "hg38":
+            return None
         gene = gene.upper()
         paths = (
             self.project_root / "demo" / "data" / f"{gene}.gtf",

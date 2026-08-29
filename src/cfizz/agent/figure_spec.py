@@ -226,7 +226,13 @@ class FigureSpecValidator:
                 if y_scale_group is not None and layer.get("kind") != "bigwig":
                     self._error(issues, "unsupported_y_scale_group", f"{path}.style.y_scale_group", "目前只有 BigWig 数值轨道可以共享 y 轴。")
 
-        if spec.get("figure_type") in {
+        # A fresh browser session starts as a draft so the user can describe
+        # a data path/workflow in chat before any Hi-C file has been chosen.
+        # Drafts still go through the structural checks above, but the
+        # renderer-specific "at least one visible Hi-C layer" requirement is
+        # deferred until the workflow has produced a real spec.
+        is_draft = bool((spec.get("metadata") or {}).get("draft"))
+        if not is_draft and spec.get("figure_type") in {
             "hic_triangle", "hic_square", "hic_oe", "hic_multi",
             "tad_insulation", "tad_multi", "tad_boundary_pileup",
             "compartment", "compartment_multi", "compartment_saddle",

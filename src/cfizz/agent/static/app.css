@@ -180,3 +180,855 @@ html[lang="en"] .history-item.current::after { content:'Current'; }
   .figure-pane { height:72vh; }
   .history-panel { width:min(360px,88%); }
 }
+
+/* Product Design pass 2: a neutral scientific editor with a restrained
+   indigo accent. Existing markup and JS hooks are deliberately untouched. */
+:root {
+  color-scheme: light;
+  --ink: #2b2522;
+  --ink-soft: #5b4f49;
+  --muted: #85766f;
+  --line: #eadfd8;
+  --line-strong: #d9c9c0;
+  --paper: #f7f3ef;
+  --panel: #fffdfb;
+  --green: #b92332;
+  --green-dark: #8f1724;
+  --green2: #fbeaec;
+  --orange: #e68a24;
+  --brand-amber: #f3a21b;
+  --brand-amber-soft: #fff3dd;
+  --danger: #b53b46;
+  --success: #287052;
+  --shadow-xs: 0 1px 2px rgba(69, 44, 35, .05);
+  --shadow-sm: 0 5px 16px rgba(69, 44, 35, .07);
+  --shadow-md: 0 18px 50px rgba(69, 44, 35, .13);
+}
+
+body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif; color: var(--ink); background: var(--paper); }
+button, input, select, textarea { transition: border-color .16s ease, box-shadow .16s ease, background-color .16s ease, color .16s ease, transform .16s ease; }
+button { color: var(--ink-soft); border-color: var(--line-strong); border-radius: 8px; background: #fff; }
+button:hover:not(:disabled) { border-color: #c7ada2; background: #fffaf7; box-shadow: var(--shadow-xs); }
+button.primary { color: #fff; background: var(--green); border-color: var(--green); box-shadow: 0 3px 8px rgba(185, 35, 50, .18); }
+button.primary:hover:not(:disabled) { background: var(--green-dark); border-color: var(--green-dark); box-shadow: 0 5px 12px rgba(185, 35, 50, .24); transform: translateY(-1px); }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible, a:focus-visible { outline: 3px solid rgba(185, 35, 50, .16); outline-offset: 2px; }
+
+.workspace { grid-template-columns: clamp(390px, 34vw, 540px) minmax(0, 1fr); gap: 0; background: var(--line); }
+.chat-pane { border-right: 1px solid var(--line); box-shadow: 8px 0 28px rgba(69, 44, 35, .045); z-index: 1; }
+.brand { padding: 17px 20px 14px; gap: 12px; background: #fff; }
+.mark { width: 46px; height: 46px; flex: 0 0 auto; overflow: hidden; border: 1px solid #f0d8b7; border-radius: 12px; background: #fff8ec; box-shadow: 0 6px 14px rgba(181, 93, 27, .15); }
+.brand-logo { display: block; width: 44px; height: 44px; object-fit: contain; }
+h1 { color: var(--ink); font-size: 16px; letter-spacing: -.025em; }
+.brand p { color: var(--muted); font-size: 11px; }
+.planner-badge { background: #f3eeeb; color: #80736d; }
+.planner-badge.ai { background: var(--green2); color: var(--green-dark); }
+.toolbar { padding: 0 20px 13px; gap: 7px; background: #fff; border-bottom: 1px solid var(--line); }
+.toolbar button { min-height: 31px; padding: 6px 9px; font-size: 11px; }
+.toolbar .primary { padding-inline: 12px; }
+.language-select { min-height: 31px; border-radius: 8px; border-color: var(--line-strong); background: #fff; color: var(--ink-soft); }
+.sidebar-tabs { padding: 9px 14px; gap: 5px; background: #f4efeb; border-bottom: 1px solid var(--line); }
+.sidebar-tabs button { border: 1px solid transparent; border-radius: 7px; color: var(--muted); background: transparent; padding: 8px 10px; font-size: 11px; font-weight: 700; }
+.sidebar-tabs button:hover:not(:disabled) { background: rgba(255,255,255,.7); box-shadow: none; }
+.sidebar-tabs button.active { color: var(--ink); background: #fff; border-color: #d7d9e2; box-shadow: var(--shadow-xs); font-weight: 800; }
+
+.conversation-panel { background: #f7f8fa; }
+.messages { padding: 18px 20px; gap: 12px; background: linear-gradient(180deg, #f8f9fb 0%, #f3f4f7 100%); }
+.message { max-width: 89%; padding: 11px 13px; border: 1px solid #eadfd8; border-left: 3px solid var(--brand-amber); border-radius: 6px 12px 12px 12px; background: #fff; box-shadow: var(--shadow-xs); }
+.message.user { border: 1px solid #efcdd1; border-right: 3px solid var(--green); border-radius: 12px 6px 12px 12px; background: var(--green2); }
+.message span { color: #a45f22; font-size: 9px; letter-spacing: .1em; }
+.message.user span { color: var(--green-dark); }
+.message p { color: var(--ink-soft); font-size: 12px; line-height: 1.58; }
+.composer { padding: 13px 18px 15px; background: rgba(255,255,255,.96); border-top: 1px solid var(--line); box-shadow: 0 -10px 28px rgba(25, 29, 42, .06); }
+.composer textarea { min-height: 62px; border-radius: 10px; border-color: var(--line-strong); background: #fbfbfd; color: var(--ink); }
+.composer textarea::placeholder { color: #a0a3ad; }
+.composer small { color: #979aa5; }
+
+.settings-panel { background: #f7f8fa; }
+.workspace-settings > summary { padding: 13px 20px; color: var(--ink); background: #fff; border-bottom: 1px solid var(--line); }
+.workspace-settings > summary::before { color: var(--green); }
+.workspace-settings > summary span { color: var(--muted); }
+.provider-control { padding: 15px 20px 16px; background: #fff; border-bottom: 1px solid var(--line); }
+.data-form { padding: 16px 20px 22px; }
+.data-form label, .provider-control label { color: var(--ink-soft); font-size: 11px; letter-spacing: .015em; }
+.data-form input, .data-form select, .provider-control select, .api-config input, .api-config select { min-height: 35px; border-radius: 8px; border-color: var(--line-strong); background: #fff; color: var(--ink); }
+.data-form input:focus, .data-form select:focus, .provider-control select:focus, .api-config input:focus, .api-config select:focus { border-color: #c45a63; box-shadow: 0 0 0 3px rgba(185, 35, 50, .11); outline: 0; }
+.data-form small, .dataset-form small, .provider-control > small { color: var(--muted); font-size: 9px; line-height: 1.48; }
+.api-config { border-color: var(--line); background: #f8f8fc; border-radius: 8px; }
+.api-config-title span { color: var(--green-dark); background: var(--green2); }
+.data-form .dataset-results { padding: 10px; border-radius: 9px; background: #fff; border-color: var(--line); box-shadow: var(--shadow-xs); }
+.dataset-results strong { color: var(--green-dark); }
+.dataset-results.error { background: #fff8f8; border-color: #edcfd1; color: var(--danger); }
+.dataset-resolution { background: var(--brand-amber-soft); border: 1px solid #f0d9b5; border-radius: 7px; }
+.dataset-file:hover, .workflow-item:hover { background: #f0f0ff; }
+.dataset-file.unknown { background: #f3f3f5; }
+.dataset-build { min-height: 37px; border-radius: 8px; }
+.dataset-build.secondary { color: var(--green-dark); border-color: #d9aab0; background: #fff; }
+.workflow-catalog { margin-top: 8px; border-top-color: var(--line); }
+.workflow-catalog summary { padding-top: 11px; color: var(--green-dark); font-size: 10px; }
+.workflow-category { color: var(--orange); }
+.workflow-configurator { border-color: var(--line); background: #fafafd; border-radius: 8px; }
+.workflow-input-file, .workflow-pair-row { border-color: var(--line); background: #fff; }
+
+.figure-pane { background: #f7f8fa; }
+.figure-header { height: 86px; padding: 18px 28px; background: #fff; border-bottom: 1px solid var(--line); }
+.eyebrow { color: var(--orange); font-size: 9px; letter-spacing: .18em; }
+.figure-header h2 { color: var(--ink); font-size: 20px; letter-spacing: -.03em; }
+.figure-actions { gap: 9px; }
+.history-button { border-color: var(--line-strong); background: #fff; }
+.history-button span { background: var(--green2); color: var(--green-dark); }
+.status { min-height: 34px; border-radius: 8px; background: #fafafd; border-color: var(--line); }
+.status.running { color: #9b672e; border-color: #ead8bc; background: #fffbf4; }
+.status.success { color: var(--success); border-color: #cce2d7; background: #f0f8f4; }
+.status.failed { color: var(--danger); border-color: #eccfd1; background: #fff8f8; }
+.figure-stage { background: #eceef2; }
+.canvas { padding: 32px; background-color: #f1ece8; background-image: linear-gradient(rgba(132, 103, 88, .045) 1px, transparent 1px), linear-gradient(90deg, rgba(132, 103, 88, .045) 1px, transparent 1px); background-size: 24px 24px; }
+.canvas img { border: 1px solid #d4d6de; border-radius: 6px; box-shadow: var(--shadow-md); }
+.empty-state { max-width: 370px; padding: 24px 30px 27px; border: 1px solid #e2d5cc; border-radius: 12px; background: rgba(255,253,251,.9); box-shadow: var(--shadow-sm); }
+.empty-brand-mark { display: block; width: 82px; height: 82px; margin: 0 auto 10px; object-fit: contain; }
+.empty-state strong { color: var(--ink); font-size: 20px; letter-spacing: -.025em; }
+.empty-state p { color: var(--muted); line-height: 1.62; }
+.render-overlay { background: rgba(238,240,243,.84); }
+.render-card { border-color: #d8d9e5; border-radius: 12px; box-shadow: var(--shadow-md); }
+.spinner { border-color: #f0d7d9; border-top-color: var(--green); }
+.progress-track { background: #e5e6ed; }
+.progress-track span { background: linear-gradient(90deg, var(--green), var(--brand-amber)); }
+.figure-footer { min-height: 82px; padding: 15px 28px; gap: 26px; background: #fff; border-top: 1px solid var(--line); }
+.figure-footer > div:not(.download-group) { min-width: 76px; padding-right: 22px; border-right: 1px solid #ececf0; }
+.figure-footer span { color: var(--muted); font-size: 9px; }
+.figure-footer strong { color: var(--ink-soft); font-size: 12px; }
+.download-group { gap: 14px !important; }
+.download { color: var(--green-dark); font-size: 11px; }
+.download:hover { color: var(--green); }
+.history-panel { background: rgba(255,255,255,.985); border-left-color: var(--line); box-shadow: -18px 0 45px rgba(25, 29, 42, .14); }
+.history-item { border-color: var(--line); }
+.history-item.current { border-color: #dbaeb3; background: #fff4f3; }
+.history-item.current::after { color: var(--green-dark); }
+
+@media (max-width: 1050px) {
+  .workspace { grid-template-columns: 380px minmax(0, 1fr); }
+  .figure-header, .figure-footer { padding-inline: 20px; }
+}
+@media (max-width: 850px) {
+  .workspace { grid-template-columns: 1fr; }
+  .chat-pane { box-shadow: none; }
+  .figure-header { height: 78px; }
+  .figure-footer { gap: 15px; overflow-x: auto; }
+  .figure-footer > div:not(.download-group) { padding-right: 15px; }
+  .download-group { margin-left: 0 !important; }
+}
+
+/* Settings information architecture: make the data step and figure step
+   read as two deliberate stages instead of one long undifferentiated form. */
+.data-form { display: block; padding: 0; background: #f7f8fa; }
+.settings-section { padding: 18px 20px 20px; border-bottom: 1px solid var(--line); }
+.settings-section-heading { display: flex; align-items: center; gap: 9px; margin-bottom: 11px; }
+.settings-step { display: inline-grid; place-items: center; flex: 0 0 auto; width: 24px; height: 24px; border-radius: 7px; color: var(--green-dark); background: var(--green2); font-size: 9px; font-weight: 850; letter-spacing: .03em; }
+.settings-section-heading label { margin: 0; color: var(--ink); font-size: 12px; font-weight: 800; letter-spacing: -.005em; }
+.data-path-row { display: grid !important; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.data-path-row input { min-width: 0; }
+.data-path-row button { min-width: 58px; padding-inline: 12px; font-weight: 700; }
+.dataset-options { display: grid !important; grid-template-columns: minmax(0, 1fr) 148px; gap: 8px; }
+.dataset-options select { max-width: none; }
+.settings-section > small { display: block; margin-top: 8px; }
+
+#datasetResults[hidden], #datasetResolution[hidden], #authorizeDataset[hidden], #uploadDataset[hidden], #buildDataset[hidden], #addTracksDataset[hidden] { display: none !important; }
+.data-form .dataset-results { display: grid; gap: 0; margin-top: 14px; padding: 0; overflow: hidden; border-radius: 10px; background: #fff; border-color: var(--line); box-shadow: var(--shadow-xs); }
+#datasetSummary { padding: 11px 13px; color: var(--ink-soft); background: #fafafd; border-bottom: 1px solid var(--line); font-size: 10px; line-height: 1.45; }
+#datasetSummary strong { color: var(--green-dark); font-weight: 800; }
+.data-form .dataset-resolution { display: grid; grid-template-columns: minmax(0, .9fr) minmax(150px, 1.1fr); align-items: center; gap: 10px; margin: 12px; padding: 11px 12px; background: var(--brand-amber-soft); border: 1px solid #f0d9b5; border-radius: 8px; }
+.resolution-copy { display: grid; min-width: 0; gap: 4px; }
+.resolution-copy label { min-width: 0; color: var(--ink); font-size: 11px; font-weight: 800; line-height: 1.2; }
+.resolution-copy small { color: var(--muted); font-size: 8px; line-height: 1.35; }
+.resolution-copy small.error { color: var(--danger); }
+.data-form .dataset-resolution select { width: 100%; min-width: 0; height: 36px; padding: 7px 9px; border-color: #dfb978; border-radius: 8px; background: #fff; color: var(--ink); font-size: 10px; font-weight: 700; }
+.data-form .dataset-resolution select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(185, 35, 50, .12); outline: 0; }
+#datasetFiles { min-width: 0; padding: 0 12px 12px; }
+.data-form .dataset-file-picker { max-height: 178px; padding: 5px 0; border-top: 1px solid #eff0f4; border-bottom: 1px solid #eff0f4; }
+.data-form .dataset-file { padding: 7px 6px; border-radius: 6px; }
+.data-form .dataset-file-name { font-size: 9px; font-weight: 750; }
+.data-form .dataset-file small { font-size: 8px; }
+.data-form .dataset-results > button { margin: 0 12px 12px; }
+.data-form .dataset-results > input + button { margin-top: 0; }
+.data-form .dataset-notices { display: block; padding: 0 12px 11px; font-size: 8px; }
+
+.figure-settings-section { padding-top: 17px; }
+.figure-type-row { display: grid !important; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.figure-type-row select { min-width: 0; width: 100%; }
+.figure-type-row button { min-height: 35px; max-width: 150px; padding-inline: 11px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.figure-settings-section > small { display: block; min-height: 14px; margin-top: 7px; }
+.figure-settings-section .dataset-actions { margin-top: 11px; }
+.figure-settings-section .dataset-build { min-height: 38px; }
+.workflow-catalog { margin: 16px 20px 22px; padding: 0 11px 11px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.workflow-catalog summary { padding: 12px 0 10px; }
+.workflow-catalog > div { padding-bottom: 2px; }
+
+@media (max-width: 470px) {
+  .dataset-options { grid-template-columns: 1fr; }
+  .data-form .dataset-resolution { grid-template-columns: 1fr; gap: 8px; }
+  .figure-type-row { grid-template-columns: 1fr; }
+  .figure-type-row button { max-width: none; width: 100%; }
+}
+
+/* Dataset scan results: separate the current selection summary from the file
+   controls and rely on the settings pane for scrolling. */
+#datasetFiles { padding: 12px; }
+.data-form .dataset-file-picker { display: grid; gap: 12px; max-height: none; overflow: visible; padding: 0; border: 0; }
+.dataset-selection-count { display: grid; gap: 10px; padding: 12px; color: var(--ink); background: #fff9f2; border: 1px solid #efddc7; border-radius: 9px; white-space: normal; }
+.selection-summary-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.selection-summary-header > div { display: grid; min-width: 0; gap: 3px; }
+.selection-summary-header strong { color: var(--ink); font-size: 11px; font-weight: 850; }
+.selection-summary-header small { color: var(--muted); font-size: 9px; line-height: 1.35; }
+.selection-status { flex: 0 0 auto; padding: 4px 7px; border-radius: 999px; font-size: 9px; font-weight: 800; white-space: nowrap; }
+.selection-status.ready { color: #287052; background: #e8f5ee; }
+.selection-status.pending { color: #9a652f; background: #fff3e3; }
+.selection-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.selection-metric { display: grid; align-content: start; min-width: 0; gap: 4px; padding: 8px; border-radius: 7px; background: #fff; border: 1px solid #e6e6ef; }
+.selection-metric span { color: var(--muted); font-size: 8px; font-weight: 750; letter-spacing: .03em; text-transform: uppercase; }
+.selection-metric strong { min-width: 0; color: var(--ink-soft); font-size: 9px; font-weight: 750; line-height: 1.35; overflow-wrap: anywhere; }
+.selection-metric.empty strong { color: #9a9da8; font-weight: 650; }
+.selection-metric.has-value { border-color: #edd8ce; }
+.selection-tip { margin: 0; padding: 7px 8px; color: #855a2c; background: #fff8ed; border-radius: 6px; font-size: 9px; line-height: 1.4; }
+
+.dataset-files-section { overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.dataset-file-toolbar { position: static; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; background: #fafafd; border-bottom: 1px solid var(--line); }
+.dataset-file-toolbar-title { color: var(--ink-soft); font-size: 10px; font-weight: 800; }
+.dataset-file-toolbar-actions { display: flex; flex: 0 0 auto; gap: 5px; }
+.dataset-file-toolbar-actions button { min-height: 28px; padding: 4px 8px !important; color: var(--green-dark); background: #fff; border-color: #d9d9e7; border-radius: 7px; font-size: 9px !important; }
+.dataset-file-list { display: grid; gap: 7px; padding: 8px; }
+.data-form .dataset-file { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 10px; border: 1px solid #e6e7ec; border-radius: 8px; background: #fff; }
+.data-form .dataset-file:hover { background: #fffaf7; border-color: #e2d0c7; }
+.data-form .dataset-file.selected { background: #fff4f3; border-color: #dbaeb3; box-shadow: inset 3px 0 0 var(--green); }
+.data-form .dataset-file.unknown { opacity: .7; background: #f5f5f7; }
+.dataset-file-select { min-height: 22px; gap: 8px; cursor: pointer; }
+.dataset-file-select > input { width: 15px !important; height: 15px !important; accent-color: var(--green); }
+.data-form .dataset-file-name { color: var(--ink); font-size: 10px; font-weight: 800; }
+.dataset-file-controls { display: grid !important; grid-template-columns: minmax(110px, .8fr) minmax(130px, 1.2fr); gap: 6px; padding-left: 23px; }
+.data-form .dataset-file-controls select, .data-form .dataset-file-controls input { min-height: 31px; padding: 5px 7px; border-radius: 7px; font-size: 9px; }
+.dataset-file-meta { padding-left: 23px; color: var(--muted); font-size: 9px; line-height: 1.35; }
+.data-form .dataset-results > button { min-height: 34px; margin: 0 12px 12px; }
+.data-form .dataset-notices { margin: 0; padding: 0 12px 12px; color: var(--muted); line-height: 1.5; }
+
+/* Workflow catalogue: grouped cards with visible readiness instead of a flat,
+   scroll-within-scroll table. */
+.workflow-catalog { padding: 0; overflow: hidden; }
+.workflow-catalog > summary { padding: 12px 13px; color: var(--ink); background: #fafafd; border-bottom: 0; font-size: 10px; font-weight: 800; }
+.workflow-catalog[open] > summary { border-bottom: 1px solid var(--line); }
+.workflow-catalog > div { display: grid; gap: 0; max-height: none; overflow: visible; padding: 0 12px; }
+.workflow-group { display: grid; gap: 7px; padding: 11px 0; border-bottom: 1px solid #ececf1; }
+.workflow-group:last-child { border-bottom: 0; }
+.workflow-category { display: flex; align-items: center; justify-content: space-between; margin: 0; color: var(--ink-soft); font-size: 10px; }
+.workflow-category strong { font-size: 10px; font-weight: 850; }
+.workflow-category span { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 6px; color: var(--muted); background: #f0f1f5; border-radius: 999px; font-size: 8px; font-weight: 750; }
+.workflow-group-items { display: grid; gap: 6px; }
+.workflow-item { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px; text-align: left; border: 1px solid #e3e4ea; border-radius: 8px; background: #fff; }
+.workflow-item:hover:not(:disabled) { background: #fffaf7; border-color: #dfc9bf; box-shadow: var(--shadow-xs); }
+.workflow-item-main { display: grid; min-width: 0; gap: 4px; color: var(--ink); white-space: normal; }
+.workflow-item-main strong { min-width: 0; color: var(--ink); font-size: 10px; font-weight: 800; line-height: 1.3; }
+.workflow-item .workflow-item-requirement { min-width: 0; color: var(--muted); font-size: 9px; font-weight: 500; line-height: 1.4; white-space: normal; overflow: visible; text-overflow: clip; }
+.workflow-item .workflow-item-action { display: inline-flex; align-items: center; justify-content: center; min-width: 64px; padding: 5px 8px; border-radius: 7px; font-size: 9px; font-style: normal; font-weight: 800; white-space: nowrap; }
+.workflow-item.ready { border-color: #ead2d5; }
+.workflow-item.ready .workflow-item-action { color: var(--green-dark); background: var(--green2); }
+.workflow-item.needs-input .workflow-item-action { color: #96612c; background: #fff2df; }
+.workflow-item.no-data:disabled { opacity: .55; background: #f7f7f9; }
+.workflow-action-hint { margin: 10px 12px 12px; padding: 9px 10px; color: var(--ink-soft) !important; background: #fff7f1; border: 1px solid #efdbce; border-radius: 7px; font-size: 8px !important; line-height: 1.45; }
+
+@media (max-width: 470px) {
+  .selection-metrics { grid-template-columns: 1fr; }
+  .dataset-file-controls { grid-template-columns: 1fr; }
+}
+
+/* Imported sources stay visible as a lightweight session shelf. A build uses
+   one explicit active source, so users never lose earlier scans or
+   accidentally combine unrelated scientific datasets. */
+.dataset-source-shelf[hidden] { display: none !important; }
+.dataset-source-shelf { display: block; margin-top: 14px; padding: 0; border: 0; border-top: 1px solid #eadfd8; border-bottom: 1px solid #eadfd8; border-radius: 0; background: transparent; box-shadow: none; }
+.dataset-source-shelf-header { cursor: pointer; padding: 10px 2px; color: var(--green-dark); }
+.dataset-source-shelf-header::marker,
+.dataset-file-toolbar::marker { color: var(--green); font-size: .8em; }
+.dataset-source-summary-row { display: inline-flex; align-items: flex-start; justify-content: space-between; width: calc(100% - 20px); margin-left: 4px; vertical-align: middle; gap: 12px; }
+.dataset-source-summary-copy { display: inline-grid; min-width: 0; gap: 3px; }
+.dataset-source-shelf-header strong { color: var(--ink); font-size: 10px; font-weight: 850; }
+.dataset-source-shelf-header small { margin: 0; color: var(--muted); font-size: 8px; line-height: 1.4; }
+#datasetSourceCount { display: inline-grid; place-items: center; flex: 0 0 auto; min-width: 28px; min-height: 22px; padding: 3px 8px; border-radius: 999px; color: var(--green-dark); background: var(--green2); font-size: 8px; font-weight: 800; white-space: nowrap; }
+.dataset-source-list { display: grid; gap: 0; border-top: 1px solid #eee5df; }
+.dataset-source-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; padding: 8px 2px; border: 0; border-bottom: 1px solid #eee7e2; border-radius: 0; background: transparent; transition: background .16s ease; }
+.dataset-source-card:last-child { border-bottom: 0; }
+.dataset-source-card:hover { background: #fffaf7; box-shadow: none; }
+.dataset-source-card.included { background: #fff8f6; box-shadow: inset 3px 0 0 var(--green); }
+.dataset-source-main { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; min-width: 0; gap: 9px; padding: 5px; text-align: left; border-radius: 6px; cursor: pointer; }
+.dataset-source-main:hover { background: rgba(255,255,255,.72); }
+.dataset-source-checkbox { width: 16px !important; height: 16px !important; min-height: 0 !important; margin: 2px 0 0; padding: 0 !important; flex: 0 0 auto !important; accent-color: var(--green); cursor: pointer; }
+.dataset-source-copy { display: grid; min-width: 0; gap: 4px; }
+.dataset-source-title-row { display: flex; align-items: center; justify-content: space-between; gap: 9px; min-width: 0; }
+.dataset-source-title-row strong { min-width: 0; overflow: hidden; color: var(--ink); font-size: 10px; font-weight: 850; text-overflow: ellipsis; white-space: nowrap; }
+.dataset-source-state { flex: 0 0 auto; padding: 3px 6px; border-radius: 999px; color: var(--muted); background: #f1efed; font-size: 8px; font-weight: 800; }
+.dataset-source-card.included .dataset-source-state { color: var(--green-dark); background: var(--green2); }
+.dataset-source-meta { color: var(--ink-soft); font-size: 8px; font-weight: 700; }
+.dataset-source-path { min-width: 0; overflow: hidden; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 8px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.dataset-source-actions { display: grid; align-content: center; gap: 4px; }
+.dataset-source-actions button { min-width: 42px; min-height: 26px; padding: 4px 7px; border-radius: 6px; color: var(--ink-soft); background: #fff; border-color: #ddd8d4; font-size: 8px; font-weight: 750; }
+.dataset-source-actions .dataset-source-refresh:hover:not(:disabled) { color: var(--green-dark); border-color: #d8a5aa; background: #fff7f5; }
+.dataset-source-actions .dataset-source-remove:hover:not(:disabled) { color: var(--danger); border-color: #e2b9bd; background: #fff5f5; }
+.dataset-import-error { margin: 10px 12px 0; padding: 9px 10px; color: var(--danger); background: #fff5f5; border: 1px solid #edcfd1; border-radius: 7px; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.data-path-row button { min-width: 84px; }
+.dataset-file-source-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 3px 2px 0; padding: 7px 8px; color: var(--ink-soft); background: #f5f1ee; border-radius: 6px; }
+.dataset-file-source-heading strong { min-width: 0; overflow: hidden; font-size: 9px; font-weight: 850; text-overflow: ellipsis; white-space: nowrap; }
+.dataset-file-source-heading span { flex: 0 0 auto; color: var(--muted); font-size: 8px; }
+
+@media (max-width: 470px) {
+  .dataset-source-card { grid-template-columns: 1fr; }
+  .dataset-source-actions { grid-template-columns: 1fr 1fr; }
+  .dataset-source-actions button { width: 100%; }
+}
+
+/* Product Design pass: keep directory permission beside the import control,
+   then turn the long file-card stack into a compact, readable data table. */
+#datasetAuthorizationBanner[hidden] { display: none !important; }
+.dataset-authorization-banner {
+  position: sticky;
+  top: 8px;
+  z-index: 12;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0 12px;
+  padding: 12px 13px;
+  border: 1px solid #e4b56f;
+  border-left: 4px solid var(--brand-amber);
+  border-radius: 9px;
+  background: #fff8eb;
+  box-shadow: 0 10px 28px rgba(91, 54, 27, .13);
+}
+.dataset-authorization-copy { display: grid; min-width: 0; gap: 3px; }
+.dataset-authorization-copy strong { color: var(--ink); font-size: 13px; font-weight: 850; }
+.dataset-authorization-copy p { color: #6f5544; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.dataset-authorization-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+.dataset-authorization-actions button { min-height: 34px; padding: 6px 10px; font-size: 11px; font-weight: 750; white-space: nowrap; }
+
+.settings-section { padding: 16px 18px 18px; }
+.settings-section-heading { margin-bottom: 10px; }
+.settings-step { width: 26px; height: 26px; font-size: 10px; }
+.settings-section-heading label { font-size: 14px; }
+.data-path-row input,
+.data-path-row button,
+.dataset-options input,
+.dataset-options select { min-height: 36px; font-size: 12px; }
+.data-path-row button { min-width: 96px; }
+.settings-section > #datasetHint { margin-top: 7px; font-size: 10.5px; line-height: 1.5; }
+
+.dataset-source-shelf { margin-top: 12px; padding: 0; }
+.dataset-source-shelf-header strong { font-size: 12px; }
+.dataset-source-shelf-header small { font-size: 10px; line-height: 1.45; }
+#datasetSourceCount { min-height: 24px; font-size: 10px; }
+.dataset-source-list { gap: 0; }
+.dataset-source-card { gap: 8px; padding: 8px 2px; border-radius: 0; }
+.dataset-source-main { gap: 8px; padding: 4px; }
+.dataset-source-copy { gap: 2px; }
+.dataset-source-title-row strong { font-size: 12px; }
+.dataset-source-state { padding: 2px 6px; font-size: 9px; }
+.dataset-source-meta { font-size: 10px; }
+.dataset-source-path { font-size: 9.5px; }
+.dataset-source-actions { display: flex; align-items: center; gap: 5px; }
+.dataset-source-actions button { min-width: 44px; min-height: 29px; padding: 4px 7px; font-size: 10px; }
+
+.data-form .dataset-results { margin-top: 0; overflow: visible; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+#datasetSummary { padding: 11px 0 9px; background: transparent; font-size: 12px; }
+.data-form .dataset-resolution { grid-template-columns: minmax(0, 1fr) minmax(150px, .9fr); gap: 9px; margin: 0; padding: 10px 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.resolution-copy label { font-size: 12px; }
+.resolution-copy small { font-size: 10px; }
+.data-form .dataset-resolution select { height: 34px; font-size: 11px; }
+
+#datasetFiles { padding: 0; }
+.data-form .dataset-file-picker { gap: 10px; }
+.dataset-selection-count { gap: 8px; padding: 10px 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
+.selection-summary-header { align-items: center; }
+.selection-summary-header strong { font-size: 13px; }
+.selection-summary-header small { font-size: 10.5px; }
+.selection-status { padding: 4px 8px; font-size: 10px; }
+.selection-metrics { grid-template-columns: minmax(105px, .8fr) minmax(0, 1.6fr) minmax(92px, .7fr); gap: 8px 14px; padding-top: 8px; border-top: 1px dashed #ead9ce; }
+.selection-metric { display: flex; flex-wrap: wrap; align-items: baseline; align-content: center; gap: 3px 6px; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.selection-metric.has-value { border: 0; }
+.selection-metric span { font-size: 9.5px; }
+.selection-metric strong { font-size: 10.5px; line-height: 1.4; }
+.selection-tip { padding: 6px 8px; font-size: 10px; }
+
+.dataset-files-section { overflow: visible; border: 0; border-radius: 0; background: transparent; }
+.dataset-file-toolbar { display: list-item; cursor: pointer; padding: 9px 2px; background: transparent; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.dataset-file-toolbar-row { display: inline-flex; align-items: center; justify-content: space-between; width: calc(100% - 20px); margin-left: 4px; vertical-align: middle; gap: 10px; }
+.dataset-file-toolbar-title { font-size: 11.5px; }
+.dataset-file-toolbar-actions button { min-height: 30px; padding: 4px 9px !important; font-size: 10.5px !important; }
+.dataset-file-list { gap: 0; padding: 0; }
+.dataset-file-source-heading { margin: 0; padding: 9px 2px 7px; border-bottom: 1px solid #eadfd8; border-radius: 0; background: transparent; }
+.dataset-file-source-heading strong { font-size: 11px; }
+.dataset-file-source-heading span { font-size: 9.5px; }
+.data-form .dataset-file {
+  grid-template-columns: minmax(105px, .8fr) minmax(0, 1.25fr);
+  grid-template-areas: "select controls" "meta controls";
+  align-items: center;
+  gap: 3px 12px;
+  padding: 10px 4px;
+  border: 0;
+  border-bottom: 1px solid #eee7e2;
+  border-radius: 0;
+  background: #fff;
+}
+.data-form .dataset-file:last-child { border-bottom: 0; }
+.data-form .dataset-file:hover { border-color: #eee7e2; background: #fffaf7; }
+.data-form .dataset-file.selected { border-color: #eee7e2; background: #fff6f5; box-shadow: inset 3px 0 0 var(--green); }
+.dataset-file-select { grid-area: select; min-height: 20px; gap: 8px; }
+.dataset-file-select > input { width: 16px !important; height: 16px !important; }
+.data-form .dataset-file-name { font-size: 12px; line-height: 1.35; }
+.dataset-file-controls { grid-area: controls; grid-template-columns: minmax(0, .85fr) minmax(0, 1.2fr); gap: 7px; padding-left: 0; }
+.data-form .dataset-file-controls select,
+.data-form .dataset-file-controls input { min-height: 34px; padding: 6px 8px; font-size: 11.5px; }
+.dataset-file-meta { grid-area: meta; padding-left: 24px; font-size: 10px; line-height: 1.4; }
+.data-form #uploadDataset { justify-self: start; min-height: 32px; margin: 10px 0 0; padding: 5px 10px; font-size: 10.5px; }
+.data-form .dataset-notices { padding: 9px 0 0; font-size: 10px; }
+.dataset-import-error { font-size: 10.5px; }
+
+.workflow-catalog { margin: 8px 18px 20px; padding: 0; overflow: visible; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; }
+.workflow-catalog > summary { padding: 12px 0; background: transparent; font-size: 12px; }
+.workflow-catalog > div { padding: 0; }
+.workflow-item { padding: 10px 2px; border: 0; border-bottom: 1px solid #e8e4e1; border-radius: 0; background: transparent; }
+.workflow-item:hover:not(:disabled) { border-color: #e8e4e1; background: #fffaf7; box-shadow: none; }
+.workflow-action-hint { margin: 10px 0 0; border: 0; border-left: 3px solid var(--brand-amber); border-radius: 3px; }
+.workflow-category strong { font-size: 11px; }
+.workflow-category span { font-size: 9.5px; }
+.workflow-item-main strong { font-size: 11.5px; }
+.workflow-item .workflow-item-requirement { font-size: 10.5px; }
+.workflow-item .workflow-item-action { font-size: 10.5px; }
+.workflow-action-hint { font-size: 10px !important; }
+
+@media (max-width: 560px) {
+  .dataset-authorization-banner { grid-template-columns: 1fr; }
+  .dataset-authorization-actions button { flex: 1; }
+  .selection-metrics { grid-template-columns: 1fr; }
+  .data-form .dataset-file { grid-template-columns: 1fr; grid-template-areas: "select" "meta" "controls"; gap: 5px; }
+  .dataset-file-controls { padding-left: 24px; }
+}
+
+/* Keep the primary decision visible before and while reviewing long file
+   inventories. File selection remains below as an advanced adjustment. */
+.figure-control-dock {
+  position: sticky;
+  top: 8px;
+  z-index: 9;
+  display: block;
+  margin: 14px -18px 0;
+  padding: 12px 18px;
+  border: 0;
+  border-top: 1px solid #e3d7d0;
+  border-bottom: 1px solid #e3d7d0;
+  border-left: 4px solid var(--green);
+  border-radius: 0;
+  background: rgba(255, 253, 251, .97);
+  box-shadow: none;
+  backdrop-filter: blur(8px);
+}
+.source-section:has(.dataset-authorization-banner:not([hidden])) .figure-control-dock { position: static; }
+.figure-control-dock .figure-dock-header { margin-bottom: 8px; }
+.figure-control-dock .settings-section-heading { margin: 0; }
+.figure-heading-copy { display: grid; min-width: 0; gap: 1px; }
+.figure-heading-copy label { color: var(--ink); font-size: 13px; font-weight: 850; }
+.figure-heading-copy small { color: var(--muted); font-size: 9.5px; font-weight: 550; line-height: 1.35; }
+.figure-dock-main { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; }
+.figure-type-control { display: grid; min-width: 0; gap: 5px; }
+.data-form .figure-type-control select { width: 100%; min-height: 38px; color: var(--ink); font-size: 12px; font-weight: 750; }
+.figure-type-control > small { min-height: 14px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.figure-control-dock #buildDataset { align-self: start; width: auto; min-width: 148px; max-width: 230px; min-height: 38px; margin: 0; padding: 7px 13px !important; font-size: 11.5px; line-height: 1.3; white-space: normal; }
+.figure-control-dock #buildDataset:disabled { opacity: 1; color: var(--green-dark); background: var(--green2); border-color: #e5bec2; box-shadow: none; }
+.figure-readiness-hint[hidden] { display: none !important; }
+.figure-readiness-hint { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 9px; margin-top: 8px; padding: 8px 9px; color: #755126; background: #fff6e7; border: 0; border-left: 3px solid var(--brand-amber); border-radius: 3px; }
+.figure-readiness-hint > span { min-width: 0; font-size: 10.5px; font-weight: 650; line-height: 1.45; overflow-wrap: anywhere; }
+.figure-readiness-hint button { min-height: 30px; padding: 5px 8px; color: #825421; background: #fff; border-color: #dfbd8a; font-size: 10px; font-weight: 750; white-space: nowrap; }
+.figure-secondary-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 7px; padding-top: 7px; border-top: 1px solid #eee3dc; }
+.figure-secondary-actions:not(:has(button:not([hidden]))) { display: none; }
+.figure-secondary-actions button { min-height: 31px; padding: 5px 9px; font-size: 10.5px; }
+.figure-secondary-actions .dataset-build { width: auto; }
+
+.preview-quality[hidden] { display: none !important; }
+.preview-quality { flex: 0 0 auto; padding: 5px 8px; color: var(--success); background: #edf8f2; border: 1px solid #cfe8da; border-radius: 999px; font-size: 9.5px; font-weight: 800; white-space: nowrap; }
+#figurePreviewFrame[hidden], #figureZoomControl[hidden] { display: none !important; }
+.canvas:not(.empty) { display: block; }
+.figure-preview-frame { display: inline-grid; place-items: center; min-width: 100%; min-height: 100%; vertical-align: top; }
+#figureImage,
+#figureImage.vector-preview { width: auto; height: auto; max-width: none; max-height: none; image-rendering: auto; object-fit: contain; object-position: center; }
+.figure-footer > div.figure-zoom-control { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 5px 9px; min-width: 255px; padding-right: 0; border-right: 0; }
+.figure-zoom-control > label { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .06em; white-space: nowrap; }
+.figure-zoom-row { display: flex !important; align-items: center; gap: 7px !important; min-width: 0; }
+.figure-zoom-row input[type="range"] { width: 118px; min-width: 80px; accent-color: var(--green); cursor: pointer; }
+.figure-zoom-row output { min-width: 36px; color: var(--ink-soft); font-size: 10px; font-weight: 800; text-align: center; }
+.figure-zoom-row button { min-height: 28px; padding: 4px 8px; color: var(--green-dark); border-color: #ddc9c0; background: #fff; font-size: 9.5px; font-weight: 750; white-space: nowrap; }
+.data-form .dataset-file.requirement-focus { background: #fff6e7; box-shadow: inset 4px 0 0 var(--brand-amber); }
+
+@media (max-width: 560px) {
+  .figure-control-dock { position: static; }
+  .figure-dock-main { grid-template-columns: 1fr; }
+  .figure-control-dock #buildDataset { width: 100%; }
+  .figure-readiness-hint { grid-template-columns: 1fr; }
+  .figure-readiness-hint button { width: 100%; }
+  .figure-footer > div.figure-zoom-control { min-width: 220px; }
+  .figure-zoom-row input[type="range"] { width: 90px; }
+}
+
+/* Figure region is an explicit generation setting. Keep the mode, value and
+   resolved viewport together so users can understand what will be rendered
+   without scanning a row of anonymous fields. */
+.dataset-options { align-items: start; grid-template-columns: minmax(0, 1.4fr) minmax(240px, .72fr); margin-top: 10px; }
+.dataset-region-control,
+.reference-build-control { display: grid; min-width: 0; gap: 6px; }
+.reference-build-status { min-height: 20px; font-size: 9.5px !important; line-height: 1.45 !important; overflow-wrap: anywhere; }
+.reference-build-status.complete { color: var(--success) !important; }
+.reference-build-status.limited { color: #946329 !important; }
+.dataset-option-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 30px; }
+.dataset-option-heading label,
+.reference-build-control > label { color: var(--ink-soft); font-size: 10.5px; font-weight: 800; line-height: 1.25; }
+.reference-build-control > label { display: flex; align-items: center; min-height: 30px; }
+.data-form .dataset-option-heading > select {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 104px;
+  min-height: 30px;
+  padding: 4px 26px 4px 8px;
+  border-color: #dfd4ce;
+  border-radius: 7px;
+  background-color: #fff;
+  color: var(--green-dark);
+  font-size: 10.5px;
+  font-weight: 800;
+}
+.data-form .dataset-region-control > input,
+.data-form .reference-build-control > select { width: 100%; min-height: 38px; }
+.data-form .reference-build-control > select { padding-right: 30px; text-overflow: ellipsis; font-size: 11px; font-weight: 700; }
+.data-form .reference-build-control.using-user-annotation > select { border-color: #83bda8; background-color: #f3faf7; box-shadow: 0 0 0 3px rgba(39, 133, 99, .08); }
+.data-form .dataset-region-control > input:disabled { color: #8d837e; background: #f3f1ef; border-color: #e3dedb; cursor: default; opacity: 1; }
+.data-form .dataset-region-control > input:not(:disabled) { border-color: #d4bcb1; background: #fff; }
+.data-form .dataset-region-control > input:not(:disabled):focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(185, 35, 50, .1); outline: 0; }
+.data-form .dataset-region-status { display: block; min-height: 28px; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+.data-form .dataset-region-status.checking { color: #8b642f; }
+.data-form .dataset-region-status.ready { color: var(--success); font-weight: 650; }
+.data-form .dataset-region-status.error { color: var(--danger); font-weight: 700; }
+
+@media (max-width: 560px) {
+  .dataset-options { grid-template-columns: 1fr; }
+  .reference-build-control { margin-top: 2px; }
+}
+
+/* Compact workspace hierarchy: the main view shows status and the next
+   decision. Import, API configuration, and the full figure catalogue live in
+   focused dialogs so opening tools no longer makes the sidebar endlessly grow. */
+.compact-workspace { min-height: 100%; background: #fbfaf9; }
+.compact-workspace .data-form { display: grid; gap: 0; padding: 0; border: 0; }
+
+.workspace-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 20px 16px;
+  background: #fff;
+  border-bottom: 1px solid #eadfd8;
+}
+.workspace-overview-copy { display: grid; min-width: 0; gap: 3px; }
+.section-kicker {
+  color: var(--green-dark);
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+.workspace-overview-copy > strong { color: var(--ink); font-size: 15px; line-height: 1.35; }
+.workspace-overview-copy > small { color: var(--muted); font-size: 10.5px; line-height: 1.45; }
+.workspace-overview-actions { display: flex; align-items: stretch; gap: 7px; }
+.workspace-overview-actions .workspace-action {
+  display: grid;
+  align-content: center;
+  gap: 1px;
+  min-height: 42px;
+  padding: 7px 11px;
+  border-color: #dfd4ce;
+  background: #fff;
+  color: var(--ink);
+  font-size: 10.5px;
+  font-weight: 800;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.workspace-overview-actions .workspace-action.primary-soft {
+  color: var(--green-dark);
+  border-color: #e4bec2;
+  background: #fff6f5;
+}
+.workspace-action > small { color: var(--muted); font-size: 8.5px; font-weight: 650; }
+
+.settings-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  margin: auto;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--ink);
+}
+.settings-dialog:not([open]) { display: none; }
+.settings-dialog::backdrop { background: rgba(39, 29, 25, .58); backdrop-filter: none; }
+.dialog-shell {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+  border: 1px solid #e6d9d2;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 20px 52px rgba(53, 35, 27, .2);
+  contain: layout paint;
+  isolation: isolate;
+}
+.dialog-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 15px;
+  border-bottom: 1px solid #eee4de;
+}
+.dialog-header > div { display: grid; gap: 3px; }
+.dialog-header h2 { color: var(--ink); font-size: 16px; line-height: 1.35; }
+.dialog-header p { color: var(--muted); font-size: 10.5px; line-height: 1.45; }
+.dialog-close { min-height: 31px; padding: 5px 9px; color: var(--muted); font-size: 10px; font-weight: 750; }
+.dialog-footer { display: flex; flex: 0 0 auto; justify-content: flex-end; padding: 12px 20px; border-top: 1px solid #eee4de; }
+.dialog-footer button { min-width: 96px; }
+
+.settings-dialog .provider-control {
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 7px 10px;
+  padding: 18px 20px 20px;
+  overflow-y: auto;
+}
+.settings-dialog .provider-control > select { min-height: 38px; font-size: 11.5px; }
+.settings-dialog .provider-control > small { font-size: 10px; }
+.settings-dialog .api-config { margin-top: 8px; border-color: #e6ddd8; background: #faf9f8; }
+.settings-dialog .api-config-title { padding: 10px 11px; font-size: 11px; }
+.settings-dialog .api-config-body { gap: 8px; padding: 4px 11px 12px; }
+.settings-dialog .api-config input,
+.settings-dialog .api-config select { min-height: 36px; font-size: 11px; }
+
+.settings-dialog .settings-section { padding: 18px 20px 20px; overflow-y: auto; }
+#dataDialog .source-section { flex: 1 1 auto; min-height: 0; }
+.data-dialog-step { display: flex; align-items: center; gap: 7px; margin: 0 0 8px; color: var(--ink); }
+.data-dialog-step > span { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; color: var(--danger); background: #fff0f1; font-size: 9px; font-weight: 850; }
+.data-dialog-step > strong { font-size: 11px; font-weight: 850; }
+.data-dialog-step.region-step { margin-top: 16px; padding-top: 14px; border-top: 1px solid #eee4de; }
+.settings-dialog .data-path-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.settings-dialog .data-path-row input,
+.settings-dialog .data-path-row button { min-height: 40px; }
+.settings-dialog .data-path-row button { min-width: 100px; }
+.settings-dialog .dataset-options { margin-top: 0; }
+.settings-dialog .dataset-source-shelf { margin-top: 14px; border-top: 1px solid #eadfd8; }
+.settings-dialog .dataset-source-shelf-header { padding: 12px 2px 8px; }
+.settings-dialog .dataset-source-list { max-height: none; overflow: visible; }
+.settings-dialog .dataset-authorization-banner { margin-top: 12px; }
+.data-dialog-footer { background: #fff; }
+
+.figure-control-dock {
+  position: static;
+  z-index: auto;
+  margin: 0;
+  padding: 18px 20px 16px;
+  border: 0;
+  border-bottom: 1px solid #eadfd8;
+  border-left: 0;
+  border-radius: 0;
+  background: #fff;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.figure-control-dock .figure-dock-header { margin-bottom: 10px; }
+.figure-control-dock .settings-step { display: none; }
+.figure-control-dock .figure-heading-copy label { font-size: 14px; }
+.figure-control-dock .figure-heading-copy small { font-size: 10px; }
+.figure-control-dock .figure-dock-main { align-items: stretch; }
+.figure-choice-button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  min-width: 0;
+  min-height: 54px;
+  padding: 8px 11px;
+  text-align: left;
+  border-color: #dccbc2;
+  background: #fff;
+}
+.figure-choice-button > span { display: grid; min-width: 0; gap: 2px; }
+.figure-choice-button > span > small { color: var(--muted); font-size: 8.5px; font-weight: 700; }
+.figure-choice-button strong { overflow: hidden; color: var(--ink); font-size: 12.5px; font-weight: 850; text-overflow: ellipsis; white-space: nowrap; }
+.figure-choice-button > small {
+  max-width: 170px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.figure-choice-button:hover:not(:disabled) { border-color: #c98f96; background: #fff9f8; }
+.figure-control-dock #buildDataset {
+  align-self: stretch;
+  min-width: 132px;
+  min-height: 54px;
+  max-width: 190px;
+  padding: 8px 13px !important;
+  font-size: 11.5px;
+}
+.figure-control-dock .figure-readiness-hint { margin-top: 10px; }
+
+.figure-type-dialog .dialog-shell { height: min(760px, calc(100vh - 32px)); }
+.figure-dialog-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scroll-behavior: auto;
+}
+.figure-type-dialog .figure-type-control {
+  display: grid;
+  min-height: auto;
+  gap: 7px;
+  padding: 16px 20px 12px;
+}
+.figure-type-section-label { color: var(--ink); font-size: 11px; font-weight: 850; }
+.figure-type-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.figure-availability-legend { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 8.5px; font-weight: 700; }
+.figure-availability-legend > span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.figure-availability-legend i { width: 7px; height: 7px; border-radius: 50%; background: #d7d0cc; }
+.figure-availability-legend .ready i { background: #2f8a66; }
+.figure-availability-legend .missing i { background: #d8902f; }
+#figureTypeSelect[hidden] { display: none !important; }
+.figure-type-choices { display: grid; gap: 12px; }
+.figure-choice-group { display: grid; gap: 6px; }
+.figure-choice-group-label { color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: .035em; }
+.figure-choice-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.figure-choice-options button {
+  display: grid;
+  min-width: 0;
+  min-height: 46px;
+  gap: 3px;
+  padding: 7px 8px;
+  overflow: hidden;
+  border-color: #e5dcd7;
+  background: #fff;
+  color: var(--ink-soft);
+  line-height: 1.3;
+  text-align: left;
+}
+.figure-choice-main { display: flex; align-items: center; justify-content: space-between; min-width: 0; gap: 8px; }
+.figure-choice-name { min-width: 0; overflow: hidden; color: var(--ink-soft); font-size: 10.5px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+.figure-choice-state { flex: 0 0 auto; padding: 3px 6px; border-radius: 999px; font-size: 8px; font-weight: 850; white-space: nowrap; }
+.figure-choice-detail { display: block; min-width: 0; overflow: hidden; color: var(--muted); font-size: 8.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.figure-choice-detail[hidden] { display: none; }
+.figure-choice-options button.is-ready:not(.current) { border-color: #cfe3d9; background: #f8fcfa; }
+.figure-choice-options button.is-ready .figure-choice-state { color: #246b50; background: #e6f4ed; }
+.figure-choice-options button.is-missing:not(.current) { border-color: #ead8bd; background: #fffbf5; }
+.figure-choice-options button.is-missing .figure-choice-state { color: #955f20; background: #fff0d9; }
+.figure-choice-options button.is-waiting { opacity: .74; background: #faf9f8; }
+.figure-choice-options button.is-waiting .figure-choice-state { color: #766b66; background: #eeeae7; }
+.figure-choice-options button.is-unavailable { opacity: .5; background: #f4f3f2; }
+.figure-choice-options button.is-unavailable .figure-choice-state { color: #766b66; background: #e7e3e0; }
+.figure-choice-options button:hover:not(:disabled) { border-color: #d7a6ac; background: #fff9f8; }
+.figure-choice-options button.current { border-color: var(--green); background: #fff4f3; box-shadow: inset 3px 0 0 var(--green); }
+.figure-choice-options button.current .figure-choice-name { color: var(--green-dark); }
+.figure-type-dialog .figure-type-control > small { min-height: 30px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.figure-type-dialog .workflow-catalog {
+  margin: 0 20px 18px;
+  overflow: visible;
+  border-top: 1px solid #eadfd8;
+}
+.figure-type-dialog .workflow-catalog > summary { padding: 11px 1px; font-size: 11px; }
+.figure-type-dialog .workflow-catalog > div { max-height: none; overflow: visible; }
+.figure-type-dialog .workflow-input-list { max-height: none; overflow: visible; }
+.figure-type-dialog .workflow-catalog.configuring > #workflowCatalog { display: none; }
+.figure-type-dialog .workflow-catalog.configuring > summary { border-bottom: 1px solid #eadfd8; }
+.figure-type-dialog .workflow-configurator { margin: 10px 0 0; }
+.figure-type-dialog .workflow-config-back { color: var(--green-dark); border-color: #dbb3b7; background: #fff; }
+
+.data-form .dataset-results {
+  display: block;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-bottom: 1px solid #eadfd8;
+  border-radius: 0;
+  background: #fbfaf9;
+  box-shadow: none;
+}
+.data-form .dataset-results[hidden] { display: none !important; }
+.dataset-results-summary {
+  cursor: pointer;
+  padding: 13px 20px;
+  color: var(--ink);
+  background: #fbfaf9;
+}
+.dataset-results-summary > span:first-child { display: inline-grid; width: calc(100% - 76px); gap: 2px; vertical-align: middle; }
+.dataset-results-summary > span:last-child {
+  float: right;
+  margin-top: 3px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: #f0ece9;
+  font-size: 8.5px;
+  font-weight: 800;
+}
+.dataset-results-summary strong { color: var(--ink); font-size: 11.5px; font-weight: 850; }
+.dataset-results-summary #datasetSummary {
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 550;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dataset-results-summary #datasetSummary strong { color: var(--muted); font-size: 9.5px; font-weight: 650; }
+.dataset-results-body { padding: 0 20px 18px; border-top: 1px solid #eee5df; background: #fff; }
+.data-form .dataset-results-body .dataset-resolution { margin: 0; padding: 12px 0; }
+.data-form .dataset-results-body #uploadDataset { margin-bottom: 0; }
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible { outline: 3px solid rgba(185, 35, 50, .16); outline-offset: 2px; }
+
+@media (max-width: 560px) {
+  .workspace-overview { grid-template-columns: 1fr; padding: 15px 16px; }
+  .workspace-overview-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .workspace-overview-actions .workspace-action { white-space: normal; }
+  .settings-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+  .dialog-shell { max-height: calc(100vh - 16px); }
+  .dialog-header { padding: 15px 16px 13px; }
+  .settings-dialog .settings-section,
+  .settings-dialog .provider-control { padding: 15px 16px 17px; }
+  .settings-dialog .data-path-row { grid-template-columns: 1fr; }
+  .settings-dialog .data-path-row button { width: 100%; }
+  .figure-control-dock { padding: 16px; }
+  .figure-control-dock .figure-dock-main { grid-template-columns: 1fr; }
+  .figure-choice-button { grid-template-columns: 1fr; gap: 4px; }
+  .figure-choice-button > small { max-width: 100%; }
+  .figure-control-dock #buildDataset { width: 100%; max-width: none; }
+  .figure-type-dialog .figure-type-control { padding-right: 16px; padding-left: 16px; }
+  .figure-choice-options { grid-template-columns: 1fr; }
+  .figure-type-dialog .workflow-catalog { margin-right: 16px; margin-left: 16px; }
+  .dataset-results-summary { padding: 12px 16px; }
+  .dataset-results-body { padding-right: 16px; padding-left: 16px; }
+}

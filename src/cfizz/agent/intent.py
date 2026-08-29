@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 
 from .capabilities import CapabilityCall, CapabilityRegistry, TargetSelector
 from .figure_types import FIGURE_TYPE_BY_ID, READY_FIGURE_TYPE_IDS
+from .parameters import ParameterCatalog
 
 
 _COLOR_WORDS = {
@@ -34,6 +35,15 @@ _DIVERGING_PALETTES = (
     (("蓝橙", "橙蓝", "blue orange", "blue-orange"), "PuOr", "#E66101", "#5E3C99", "蓝橙"),
     (("红蓝", "蓝红", "red blue", "red-blue"), "RdBu_r", "#D73027", "#4575B4", "红蓝"),
     (("棕绿", "绿棕", "brown green", "brown-green"), "BrBG", "#018571", "#A6611A", "棕绿"),
+)
+
+_COMPARTMENT_DIFF_RECOMMENDED_COLORS = (
+    ("stable_a_color", "#0072B2"),
+    ("stable_b_color", "#009E73"),
+    ("a_to_b_color", "#E69F00"),
+    ("b_to_a_color", "#D55E00"),
+    ("control_density_color", "#56B4E9"),
+    ("treatment_density_color", "#CC79A7"),
 )
 
 
@@ -162,58 +172,119 @@ class SimpleIntentInterpreter:
             word in lowered for word in ("标签", "标志", "轨道", "基因", "label")
         )
         if layer_font_request:
-            current = float(matched_font_layer.get("style", {}).get("fontsize", spec.get("layout", {}).get("font_size", 5)))
-            explicit = re.search(r"(?:标签|标志|轨道|基因).*?(?:字体|字号).*?(?:调到|改成|设为|到|=|为)?\s*(\d+(?:\.\d+)?)", text, re.I)
-            if explicit:
-                new_size = float(explicit.group(1))
+            parameter = self._font_parameter(spec, target_id=matched_font_layer["id"])
+            current_value = parameter.get("current_value") if parameter else None
+            if current_value is None:
+                current_value = matched_font_layer.get("style", {}).get(
+                    "fontsize", spec.get("layout", {}).get("font_size", 5),
+                )
+            current = float(current_value)
+            explicit = self._parse_font_size(text)
+            if explicit is not None:
+                new_size = explicit
             elif any(word in lowered for word in ("大一点", "调大", "增大", "放大", "太小", "小了")):
                 new_size = round(max(current + 1, current * 1.3), 1)
             elif any(word in lowered for word in ("小一点", "调小", "减小", "缩小", "太大", "大了")):
                 new_size = round(current / 1.25, 1)
             else:
                 return IntentResult("clarify", f"请说明希望把“{matched_font_layer.get('label') or matched_font_layer['id']}”标签字体调大、调小，或指定字号。")
-            if not 3 <= new_size <= 24:
-                return IntentResult("clarify", "轨道标签字体支持 3–24 pt，请在这个范围内选择。")
+            minimum = float(parameter.get("minimum", 3) if parameter else 3)
+            maximum = float(parameter.get("maximum", 24) if parameter else 24)
+            requested = new_size
+            new_size = min(max(new_size, minimum), maximum)
+            label = matched_font_layer.get("label") or matched_font_layer["id"]
+            if new_size != requested:
+                reply = (
+                    f"“{label}”标签字体请求为 {requested:g} pt；当前支持 {minimum:g}–{maximum:g} pt，"
+                    f"将自动采用最近可用值 {new_size:g} pt。"
+                )
+            else:
+                reply = f"将“{label}”的标签字体从 {current:g} pt 调整为 {new_size:g} pt。"
+            target_kind = parameter.get("target_kind", "layer") if parameter else "layer"
+            field = parameter.get("parameter", "style.fontsize") if parameter else "style.fontsize"
             return IntentResult(
                 "patch",
-                f"将“{matched_font_layer.get('label') or matched_font_layer['id']}”的标签字体从 {current:g} pt 调整为 {new_size:g} pt。",
+                reply,
                 {
-                    "summary": f"修改 {matched_font_layer['id']} 标签字体为 {new_size:g} pt",
+                    "summary": reply,
                     "operations": [{
-                        "op": "update", "target_kind": "layer", "target_id": matched_font_layer["id"],
-                        "field": "style.fontsize", "value": new_size,
+                        "op": "update", "target_kind": target_kind, "target_id": matched_font_layer["id"],
+                        "field": field, "value": new_size,
                     }],
                 },
             )
 
         if font_request:
-            current = float(spec.get("layout", {}).get("font_size", 5))
-            explicit = re.search(r"(?:图中(?:的)?文字|图里的文字|字体|字号|font\s*size|fontsize)\s*(?:调到|改成|设为|到|=|为)?\s*(\d+(?:\.\d+)?)", text, re.I)
-            if explicit:
-                new_size = float(explicit.group(1))
+            parameter = self._font_parameter(spec)
+            current_value = parameter.get("current_value") if parameter else None
+            if current_value is None:
+                current_value = spec.get("layout", {}).get("font_size", 5)
+            current = float(current_value)
+            explicit = self._parse_font_size(text)
+            if explicit is not None:
+                new_size = explicit
             elif any(word in lowered for word in ("大一点", "调大", "增大", "放大")):
                 new_size = round(current * 1.25, 1)
             elif any(word in lowered for word in ("小一点", "调小", "减小", "缩小")):
                 new_size = round(current / 1.25, 1)
             else:
                 return IntentResult("clarify", "请说明希望把图内字体调大、调小，或者指定字号，例如“图中文字调到 7 pt”。")
-            if not 3 <= new_size <= 24:
-                return IntentResult("clarify", "绘图字体支持 3–24 pt，请在这个范围内选择。")
+            minimum = float(parameter.get("minimum", 3) if parameter else 3)
+            maximum = float(parameter.get("maximum", 24) if parameter else 24)
+            requested = new_size
+            new_size = min(max(new_size, minimum), maximum)
+            if new_size != requested:
+                reply = (
+                    f"图内字体请求为 {requested:g} pt；当前支持 {minimum:g}–{maximum:g} pt，"
+                    f"将自动采用最近可用值 {new_size:g} pt。"
+                )
+            else:
+                reply = f"将生成图中的基础字体从 {current:g} pt 调整为 {new_size:g} pt。"
+            target_kind = parameter.get("target_kind", "layout") if parameter else "layout"
+            field = parameter.get("parameter", "font_size") if parameter else "font_size"
             return IntentResult(
                 "patch",
-                f"将生成图中的基础字体从 {current:g} pt 调整为 {new_size:g} pt。",
+                reply,
                 {
-                    "summary": f"修改绘图字体为 {new_size:g} pt",
+                    "summary": reply,
                     "operations": [{
                         "op": "update",
-                        "target_kind": "layout",
-                        "field": "font_size",
+                        "target_kind": target_kind,
+                        "field": field,
                         "value": new_size,
                     }],
                 },
             )
 
-        palette_request = any(word in lowered for word in ("配色", "色图", "颜色换", "颜色改", "换掉", "换个颜色", "换一套"))
+        palette_request = (
+            any(word in lowered for word in (
+                "配色", "色图", "颜色换", "颜色改", "颜色都换", "换颜色",
+                "换配色", "换掉", "换个颜色", "换一套", "色系",
+            ))
+            or ("颜色" in lowered and any(word in lowered for word in ("换", "改", "调整", "不好看")))
+        )
+        recommended_palette_request = any(word in lowered for word in (
+            "推荐一套", "你推荐", "帮我选", "你来选", "recommend a palette",
+        ))
+        if spec.get("figure_type") == "compartment_diff_scatter" and (
+            palette_request or recommended_palette_request
+        ):
+            return IntentResult(
+                "patch",
+                "已采用一套色盲友好的蓝、绿、橙、朱红分类配色，并同步调整上下边缘密度曲线。",
+                {
+                    "summary": "修改 Compartment 差异散点图配色",
+                    "operations": [
+                        {
+                            "op": "update",
+                            "target_kind": "figure",
+                            "field": f"workflow_options.{field}",
+                            "value": value,
+                        }
+                        for field, value in _COMPARTMENT_DIFF_RECOMMENDED_COLORS
+                    ],
+                },
+            )
         palette = self._parse_diverging_palette(lowered)
         if palette and palette[3] == "红蓝" and "换掉" in lowered and not any(word in lowered for word in ("换成", "改成", "改为", "用")):
             palette = ("PRGn", "#1B7837", "#762A83", "紫绿")
@@ -690,6 +761,38 @@ class SimpleIntentInterpreter:
         if not match:
             return None
         return SimpleIntentInterpreter._scaled_number(match.group(1), match.group(2))
+
+    @staticmethod
+    def _parse_font_size(text: str) -> Optional[float]:
+        """Parse common font-size phrasings, including compact ``换到2pt``."""
+        match = re.search(
+            r"(?:图中(?:的)?文字|图里的文字|字体|字号|font\s*size|fontsize)"
+            r"[^\d]{0,16}(\d+(?:\.\d+)?)\s*(?:pt|磅)?",
+            text,
+            re.I,
+        )
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _font_parameter(spec: Dict[str, Any], target_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Return the renderer-backed font parameter for the active figure."""
+        entries = [
+            item for item in ParameterCatalog(spec).model_catalog()
+            if item.get("group") == "typography"
+        ]
+        if target_id is not None:
+            return next((
+                item for item in entries
+                if item.get("target_kind") == "layer" and item.get("target_id") == target_id
+            ), None)
+        figure_entries = [
+            item for item in entries
+            if item.get("target_kind") in {"figure", "layout"} and not item.get("target_id")
+        ]
+        return next((
+            item for item in figure_entries
+            if item.get("parameter") == "workflow_options.font_size"
+        ), figure_entries[0] if figure_entries else None)
 
     def _parse_loop_size(self, text: str, spec: Dict[str, Any]) -> Optional[IntentResult]:
         """Handle the unambiguous, high-frequency "Loop circle" edit locally.

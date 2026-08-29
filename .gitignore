@@ -93,6 +93,7 @@ agent_runtime/
 *.webp
 !docs/**/*.png
 !docs/**/*.pdf
+!src/cfizz/agent/static/cfizz-brand-mark.png
 
 # Local experiment data and generated results (never commit or upload)
 # Keep only the small README placeholders that explain how to provide data.

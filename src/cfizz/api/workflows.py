@@ -18,6 +18,11 @@ def plot_eigenvector_from_file(
     resolution: int,
     output: str,
     formats=("svg", "png", "pdf"),
+    positive_color: str = "#E41A1C",
+    negative_color: str = "#377EB8",
+    width_cm: float = 25.4,
+    height_cm: float = 5.08,
+    dpi: int = 300,
     **kwargs: Any,
 ):
     """Read a CFIZZ E1 table and render it with the official E1 renderer."""
@@ -30,7 +35,12 @@ def plot_eigenvector_from_file(
         path = f"{output}.{fmt}"
         figure = plot_eigenvector(
             data, chrom, start, end, resolution,
-            save_path=path, **kwargs,
+            color_up=positive_color,
+            color_down=negative_color,
+            figsize=(width_cm / 2.54, height_cm / 2.54),
+            save_path=path,
+            dpi=dpi,
+            **kwargs,
         )
         import matplotlib.pyplot as plt
         plt.close(figure)
@@ -63,17 +73,23 @@ def plot_track_files(
     start: int,
     end: int,
     output: str,
+    formats=("svg", "png", "pdf"),
     **kwargs: Any,
 ):
     """Render validated BigWig/GTF/BED configs via CFIZZ ``quick_plot``."""
     from cfizz.api.integrated.tracks.simple import GenomeRange, quick_plot
 
-    return quick_plot(
-        tracks=tracks,
-        region=GenomeRange(chrom, start, end),
-        output=output,
-        **kwargs,
-    )
+    outputs = []
+    for fmt in formats:
+        target = f"{output}.{fmt}"
+        quick_plot(
+            tracks=tracks,
+            region=GenomeRange(chrom, start, end),
+            output=target,
+            **kwargs,
+        )
+        outputs.append(target)
+    return outputs
 
 
 def generate_multi_heatmap(*args: Any, **kwargs: Any):

@@ -112,6 +112,7 @@ def plot_heatmap_with_e1(
     positive_color: str = "red",
     negative_color: str = "blue",
     formats=("png", "svg", "pdf"),
+    dpi: int = 300,
 ):
     """
     绘制 O/E 热图 + E1 柱状图
@@ -232,7 +233,7 @@ def plot_heatmap_with_e1(
     
     # 保存图片
     from .layout import save_figure_multi_format
-    save_figure_multi_format(fig, output_prefix, formats=list(formats))
+    save_figure_multi_format(fig, output_prefix, dpi=dpi, formats=list(formats))
 
 
 def plot_compartment(
@@ -252,6 +253,7 @@ def plot_compartment(
     positive_color: str = "red",
     negative_color: str = "blue",
     formats=("png", "svg", "pdf"),
+    dpi: int = 300,
 ) -> Dict[str, Any]:
     """
     生成 compartment 分析的可视化(纯可视化函数,读已计算产物)。
@@ -330,6 +332,7 @@ def plot_compartment(
             positive_color=positive_color,
             negative_color=negative_color,
             formats=formats,
+            dpi=dpi,
         )
     
     return {

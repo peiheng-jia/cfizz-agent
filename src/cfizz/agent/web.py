@@ -29,6 +29,7 @@ from .companions import (
 )
 from .dataset import (
     DatasetScan,
+    _capabilities,
     _parse_region_query,
     build_integrated_spec,
     build_workflow_spec,
@@ -36,6 +37,7 @@ from .dataset import (
     prepare_workflow_selection,
     scan_dataset,
     select_dataset_files,
+    _suggest_workflow_bindings,
     _source_type_supports_role,
 )
 from .figure_spec import FigureSpecValidator
@@ -47,9 +49,14 @@ from .figure_types import (
     supports_integrated_tracks,
 )
 from .inspection import DataInspector
-from .intent import IntentResult
+from .intent import IntentResult, SimpleIntentInterpreter
 from .jobs import RenderJobManager
 from .planner import build_planner_registry_from_env
+from .parameters import (
+    ParameterCatalog,
+    ParameterEdit,
+    visualization_parameter_catalog,
+)
 from .references import ReferenceRegistry, normalize_chromosome
 from .session import FigureSession, FileFigureSessionStore
 
@@ -63,6 +70,12 @@ class DemoSessionBody(BaseModel):
     session_id: str = "foxj1_demo"
 
 
+class BlankSessionBody(BaseModel):
+    """Create the lightweight session used by a newly opened chat pane."""
+
+    session_id: str = Field(min_length=1)
+
+
 class FromHicBody(BaseModel):
     session_id: str = Field(min_length=1)
     hic_path: str = Field(min_length=1)
@@ -71,6 +84,7 @@ class FromHicBody(BaseModel):
     start: Optional[int] = Field(default=None, ge=0)
     end: Optional[int] = Field(default=None, gt=0)
     region: Optional[str] = Field(default=None, max_length=160)
+    reference_build: str = "hg38"
     figure_type: str = "hic_triangle"
     render: bool = True
 
@@ -80,10 +94,18 @@ class PatchBody(BaseModel):
     render: bool = True
 
 
+class ParameterUpdateBody(ParameterEdit):
+    """Typed, allow-listed update for one current visualization parameter."""
+
+    render: bool = True
+    confirm_scientific_change: bool = False
+
+
 class WorkflowBody(BaseModel):
     figure_type: str = Field(min_length=1, max_length=120)
     source_ids: list[str] = Field(default_factory=list)
     dataset_path: Optional[str] = None
+    source_paths: list[str] = Field(default_factory=list)
     selected_paths: list[str] = Field(default_factory=list)
     gene: Optional[str] = Field(default=None, max_length=160)
     reference_build: str = "hg38"
@@ -110,6 +132,7 @@ class PlannerConfigBody(BaseModel):
 
 class DatasetScanBody(BaseModel):
     path: str = Field(min_length=1)
+    source_paths: list[str] = Field(default_factory=list)
     gene: Optional[str] = Field(default=None, max_length=120)
     reference_build: str = "hg38"
     selected_paths: Optional[list[str]] = None
@@ -128,6 +151,7 @@ class DatasetSessionBody(DatasetScanBody):
     workflow_bindings: list[Dict[str, Any]] = Field(default_factory=list)
     pairings_confirmed: bool = False
     render: bool = True
+    preview_only: bool = False
 
 
 class WorkspaceService:
@@ -267,7 +291,11 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
 
     @app.get("/assets/{asset_name}", include_in_schema=False)
     async def asset(asset_name: str):
-        allowed = {"app.css": "text/css; charset=utf-8", "app.js": "text/javascript; charset=utf-8"}
+        allowed = {
+            "app.css": "text/css; charset=utf-8",
+            "app.js": "text/javascript; charset=utf-8",
+            "cfizz-brand-mark.png": "image/png",
+        }
         if asset_name not in allowed:
             raise HTTPException(404, "找不到静态资源。")
         return Response((static_root / asset_name).read_bytes(), media_type=allowed[asset_name])
@@ -288,7 +316,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "service": "cfizz-agent", "api_revision": 7}
+        return {"status": "ok", "service": "cfizz-agent", "api_revision": 12}
 
     @app.get("/api/planner")
     async def planner_status():
@@ -325,6 +353,15 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
     async def figure_types():
         return {"figure_types": figure_type_catalog()}
 
+    @app.get("/api/visualization-parameters")
+    async def visualization_parameters(figure_type: Optional[str] = None):
+        """Describe supported controls without requiring an active session."""
+        try:
+            catalog = visualization_parameter_catalog(figure_type)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"figure_types": catalog}
+
     @app.get("/api/references")
     async def references():
         return {"references": service.references.catalog()}
@@ -332,8 +369,9 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
     @app.post("/api/datasets/scan")
     async def scan_data_directory(body: DatasetScanBody):
         try:
-            scan = scan_dataset(
+            scan = _scan_dataset_sources(
                 body.path,
+                body.source_paths,
                 service.inspector,
                 service.references,
                 gene=body.gene,
@@ -414,8 +452,9 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
     @app.post("/api/sessions/from-dataset")
     async def create_from_dataset(body: DatasetSessionBody):
         try:
-            scan = scan_dataset(
+            scan = _scan_dataset_sources(
                 body.path,
+                body.source_paths,
                 service.inspector,
                 service.references,
                 gene=body.gene,
@@ -522,7 +561,11 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                     "已按所选图类型生成 Hi-C 图，轨道数据保留在会话中，可切换到 Hi-C 多组学整合图后使用。"
                 )
             if body.figure_type == "hic_triangle":
-                session = service.create(body.session_id, spec, replace=True)
+                session = (
+                    FigureSession(body.session_id, spec, validator=service.validator)
+                    if body.preview_only
+                    else service.create(body.session_id, spec, replace=True)
+                )
             else:
                 # A workflow button may be used immediately after a directory
                 # scan, before a triangle session exists.  Build the standard
@@ -545,11 +588,19 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                 if resolved.action != "patch" or not resolved.patch:
                     raise ValueError(resolved.reply)
                 session.apply_patch(_augment_compartment_patch(resolved.patch, session.current_spec, service.inspector))
-                with service._lock:
-                    service.sessions[body.session_id] = session
-                    service.save(session)
+                if not body.preview_only:
+                    with service._lock:
+                        service.sessions[body.session_id] = session
+                        service.save(session)
         except (OSError, PermissionError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
+        if body.preview_only:
+            return {
+                "spec": session.current_spec,
+                "dataset_scan": scan.to_dict(),
+                "job": None,
+                "preview_only": True,
+            }
         job = service.submit_render(session).to_dict() if body.render else None
         return {**service.session_payload(session), "dataset_scan": scan.to_dict(), "job": job}
 
@@ -565,11 +616,13 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                 "这不是三角形限制。请切换到“Hi-C 多组学整合图”（或支持整合轨道的 TAD 区域图）后再添加轨道。",
             )
         try:
-            resolved = service.inspector.platform_path(body.path).expanduser()
-            if resolved.exists() and resolved.is_dir():
-                service.inspector.authorize_root(str(resolved))
-            scan = scan_dataset(
+            for source_path in _dataset_source_paths(body.path, body.source_paths):
+                resolved = service.inspector.platform_path(source_path).expanduser()
+                if resolved.exists() and resolved.is_dir():
+                    service.inspector.authorize_root(str(resolved))
+            scan = _scan_dataset_sources(
                 body.path,
+                body.source_paths,
                 service.inspector,
                 service.references,
                 gene=body.gene,
@@ -616,8 +669,26 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         job = service.submit_render(session)
         return {**service.session_payload(session), "job": job.to_dict()}
 
+    @app.post("/api/sessions/blank")
+    async def create_blank(body: BlankSessionBody):
+        """Open chat without inventing a figure or triggering a render.
+
+        The browser can therefore accept a first message such as
+        ``/data/case1 画多样本 Hi-C``.  The chat workflow then replaces this
+        draft with a validated, data-backed FigureSpec after confirmation.
+        """
+        try:
+            session = service.create(body.session_id, _blank_chat_spec(body.session_id), replace=True)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return service.session_payload(session)
+
     @app.post("/api/sessions/from-hic")
     async def create_from_hic(body: FromHicBody):
+        try:
+            reference = service.references._build(body.reference_build).to_dict()
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         if body.figure_type not in DIRECT_FIGURE_TYPE_IDS:
             raise HTTPException(422, "该图类型需要额外输入，当前不能仅凭一个 cool/mcool 文件生成。")
         try:
@@ -638,7 +709,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
             raise HTTPException(422, f"文件中没有染色体 {chrom}。")
         query_region = _parse_region_query(body.region)
         if body.region and query_region is None:
-            location = service.references.locate_gene(body.region, "hg38")
+            location = service.references.locate_gene(body.region, body.reference_build)
             if location is None:
                 raise HTTPException(422, f"无法识别“{body.region}”。请输入基因名，或范围如 chr1:1-2Mb。")
             query_region = (location.chrom, max(0, location.start - 500_000), location.end + 500_000)
@@ -677,7 +748,10 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                 if companion.resolution not in resolutions:
                     raise HTTPException(422, f"配套结果使用 {companion.resolution} bp，但矩阵没有该分辨率。")
                 resolution = companion.resolution
-        spec = _single_hic_spec(body.session_id, body.title, inspection.path, inspection.type, chrom, start, end, resolution, body.figure_type)
+        spec = _single_hic_spec(
+            body.session_id, body.title, inspection.path, inspection.type,
+            chrom, start, end, resolution, body.figure_type, reference,
+        )
         if companion is not None:
             spec["data_sources"].append({
                 "id": (
@@ -714,6 +788,58 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
     async def get_session(session_id: str):
         return service.session_payload(_session_or_404(service, session_id))
 
+    @app.get("/api/sessions/{session_id}/parameters")
+    async def get_session_parameters(session_id: str):
+        session = _session_or_404(service, session_id)
+        return {
+            "session_id": session.session_id,
+            "version_id": session.current.version_id,
+            "figure_type": session.current_spec.get("figure_type"),
+            "parameters": ParameterCatalog(session.current_spec).model_catalog(),
+        }
+
+    @app.post("/api/sessions/{session_id}/parameters")
+    async def update_session_parameter(session_id: str, body: ParameterUpdateBody):
+        """Safely update one catalogued parameter and optionally re-render."""
+        session = _session_or_404(service, session_id)
+        try:
+            operation, scientific = ParameterCatalog(session.current_spec).compile(
+                ParameterEdit(
+                    target_kind=body.target_kind,
+                    target_id=body.target_id,
+                    parameter=body.parameter,
+                    operation=body.operation,
+                    value=body.value,
+                )
+            )
+            if scientific and not body.confirm_scientific_change:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "message": "该参数会改变科学计算结果，请确认后再提交。",
+                        "requires_confirmation": True,
+                        "parameter": body.parameter,
+                    },
+                )
+            patch = {
+                "summary": f"更新可视化参数 {body.parameter}",
+                "operations": [operation],
+            }
+            with service._lock:
+                revision = session.apply_patch(patch)
+                service.save(session)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        job = service.submit_render(session).to_dict() if body.render else None
+        return {
+            **service.session_payload(session),
+            "revision": revision.to_dict(),
+            "parameters": ParameterCatalog(session.current_spec).model_catalog(),
+            "job": job,
+        }
+
     @app.post("/api/sessions/{session_id}/patch")
     async def apply_patch(session_id: str, body: PatchBody):
         session = _session_or_404(service, session_id)
@@ -740,10 +866,12 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         # spec from exactly those files, then commit the resolved workflow as
         # one undoable revision.  This avoids silently falling back to sources
         # that merely belonged to the previously displayed figure.
-        if body.dataset_path and body.selected_paths:
+        if (body.dataset_path or body.source_paths) and body.selected_paths:
             try:
-                scan = scan_dataset(
-                    body.dataset_path,
+                primary_path = body.dataset_path or body.source_paths[0]
+                scan = _scan_dataset_sources(
+                    primary_path,
+                    body.source_paths,
                     service.inspector,
                     service.references,
                     gene=body.gene,
@@ -832,11 +960,33 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
     async def chat(session_id: str, body: ChatBody):
         session = _session_or_404(service, session_id)
         history = service.dialogue_history.get(session_id, [])
-        intent = _hic_comparison_intent(service, session, body.message, history=history)
+        confirmation = _confirmation_text(body.message)
+        cancellation = _cancellation_text(body.message)
+        pending = service.pending_actions.pop(session_id, None) if (confirmation or cancellation) else None
+        intent = None
+        # A chat workflow is a two-step operation: first prepare and explain
+        # the exact CFIZZ inputs, then mutate/render only after the user says
+        # “确认”.  This keeps conversational drawing consistent with the
+        # right-hand workflow picker and avoids a hidden “guess all files” run.
+        if pending is not None and pending.get("kind") == "workflow":
+            if cancellation:
+                intent = IntentResult("answer", "已取消这次 CFIZZ 工作流，没有修改当前图。", planner="chat:workflow")
+            elif confirmation:
+                intent = IntentResult(
+                    "workflow_apply",
+                    pending["apply_reply"],
+                    {"workflow_pending": pending},
+                    planner="chat:workflow",
+                )
+        elif not confirmation and not cancellation:
+            request = _chat_workflow_request(body.message, history, session)
+            if request is not None:
+                intent = _chat_workflow_confirmation(service, session, request)
+
+        if intent is None:
+            intent = _hic_comparison_intent(service, session, body.message, history=history)
         if intent is None:
             intent = _directory_track_intent(service, session, body.message, history=history)
-        confirmation = _confirmation_text(body.message)
-        pending = service.pending_actions.pop(session_id, None) if confirmation else None
         if intent is None and pending is not None:
             intent = IntentResult(
                 "patch",
@@ -884,7 +1034,12 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         # drawing command into a multiple-choice question.  Keep AI-first
         # semantic handling, but do not expose that uncertainty to the user
         # when the local hg38 reference can validate and execute the request.
-        if intent.action == "clarify":
+        # A workflow preview is deliberately a clarification: it contains the
+        # exact files, pairing and CFIZZ entrypoint that will be used after the
+        # user confirms.  Do not let the later gene/reference convenience
+        # fallbacks reinterpret words such as “Hi-C” in that preview request
+        # and turn it into an immediate annotation patch.
+        if intent.action == "clarify" and intent.planner != "chat:workflow":
             local_gene_intent = _region_gene_annotation_intent(service, session, body.message)
             if local_gene_intent is None:
                 local_gene_intent = _gene_annotation_intent(service, session, body.message)
@@ -908,6 +1063,26 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                 "AI 服务没有返回可用的理解结果（接口返回 Not Found）。请检查 API 地址和模型名称后重试；也可以先切换到本地规则。",
                 planner=f"{intent.planner}:invalid-response",
             )
+
+        # The external planner receives redacted paths for privacy, so it
+        # cannot itself bind a local file.  When it nevertheless identifies a
+        # registered CFIZZ workflow, reuse the local path extractor and send
+        # the request through the same preview/confirmation state machine as
+        # deterministic aliases.  This lets API users say “画某某图” in
+        # natural language without bypassing contract validation.
+        if intent.action == "workflow":
+            ai_workflow_type = str((intent.patch or {}).get("workflow_request", {}).get("figure_type") or "")
+            explicit_paths, dataset_path = _chat_extract_paths(body.message)
+            if ai_workflow_type and (explicit_paths or dataset_path):
+                chat_request = _chat_workflow_request(
+                    body.message,
+                    history,
+                    session,
+                    figure_type_override=ai_workflow_type,
+                    allow_without_draw_words=True,
+                )
+                if chat_request is not None:
+                    intent = _chat_workflow_confirmation(service, session, chat_request)
 
         if intent.action == "reference":
             intent = _resolve_ai_reference_intent(service, session, intent)
@@ -946,6 +1121,14 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                     session.undo()
                 elif intent.action == "redo":
                     session.redo()
+                elif intent.action == "workflow_apply":
+                    pending_workflow = (intent.patch or {}).get("workflow_pending")
+                    if not isinstance(pending_workflow, dict) or not isinstance(pending_workflow.get("spec"), dict):
+                        raise ValueError("聊天工作流确认已过期，请重新描述数据路径和图类型。")
+                    revision = session.replace_spec(
+                        deepcopy(pending_workflow["spec"]),
+                        summary=str(pending_workflow.get("summary") or "使用聊天确认的数据生成 CFIZZ 图"),
+                    )
                 elif intent.action == "patch" and intent.patch:
                     session.apply_patch(_augment_compartment_patch(intent.patch, session.current_spec, service.inspector))
                 elif intent.action != "render":
@@ -953,7 +1136,11 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                 service.save(session)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
-        job = service.submit_render(session).to_dict() if body.render else None
+        # A draft session is a chat workspace, not a renderable figure.  Do
+        # not enqueue a job until a real workflow or Hi-C source has replaced
+        # the draft spec.
+        is_draft = bool((session.current_spec.get("metadata") or {}).get("draft"))
+        job = service.submit_render(session).to_dict() if body.render and not is_draft else None
         service.remember_dialogue(session_id, body.message, intent.reply)
         return {"intent": intent.to_dict(), **service.session_payload(session), "job": job}
 
@@ -1009,6 +1196,112 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         return payload
 
     return app
+
+
+def _dataset_source_paths(primary_path: str, source_paths: Optional[list[str]] = None) -> list[str]:
+    """Return stable, de-duplicated roots for one multi-source selection."""
+    roots: list[str] = []
+    seen: set[str] = set()
+    for raw_path in [primary_path, *(source_paths or [])]:
+        value = str(raw_path or "").strip()
+        if not value:
+            continue
+        key = value.replace("\\", "/").rstrip("/").casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(value)
+    if not roots:
+        raise ValueError("请至少提供一个数据源路径。")
+    return roots
+
+
+def _scan_dataset_sources(
+    primary_path: str,
+    source_paths: Optional[list[str]],
+    inspector: DataInspector,
+    references: ReferenceRegistry,
+    *,
+    gene: Optional[str] = None,
+    build: str = "hg38",
+    file_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+) -> DatasetScan:
+    """Scan one or more authorized roots as a single explicit inventory.
+
+    Files remain at their original absolute paths.  Merging only changes the
+    selection inventory, so FigureSpec provenance and path validation still
+    refer to the exact source file chosen by the user.
+    """
+    scans = [
+        scan_dataset(
+            path,
+            inspector,
+            references,
+            gene=gene,
+            build=build,
+            file_overrides=file_overrides,
+        )
+        for path in _dataset_source_paths(primary_path, source_paths)
+    ]
+    if len(scans) == 1:
+        return scans[0]
+
+    files = []
+    seen_files: set[str] = set()
+    for scan in scans:
+        for item in scan.files:
+            key = str(item.path).replace("\\", "/").rstrip("/").casefold()
+            if key in seen_files:
+                continue
+            seen_files.add(key)
+            files.append(item)
+
+    hic_scans = [
+        scan for scan in scans
+        if any(item.usable and item.role == "hic" for item in scan.files)
+    ]
+    chromosome_sets = [set(scan.chromosomes) for scan in hic_scans if scan.chromosomes]
+    if chromosome_sets:
+        shared_chromosomes = set.intersection(*chromosome_sets)
+        chromosomes = [chrom for chrom in hic_scans[0].chromosomes if chrom in shared_chromosomes]
+    else:
+        chromosomes = []
+
+    resolution_sets = [set(map(int, scan.resolutions)) for scan in hic_scans if scan.resolutions]
+    resolutions = sorted(set.intersection(*resolution_sets)) if resolution_sets else []
+    gene_location = next((scan.gene for scan in scans if scan.gene), None)
+    reference_scan = next(
+        (scan for scan in scans if scan.reference.get("user_annotation")),
+        scans[0],
+    )
+
+    roles = {item.role for item in files if item.usable}
+    missing = list(dict.fromkeys(message for scan in scans for message in scan.missing))
+    if "hic" in roles:
+        missing = [message for message in missing if "cool" not in message.lower() and "mcool" not in message.lower()]
+    if gene_location:
+        missing = [message for message in missing if "未在当前 GTF" not in message]
+
+    warnings = list(dict.fromkeys(message for scan in scans for message in scan.warnings))
+    if "signal" in roles:
+        warnings = [message for message in warnings if "未发现 BigWig" not in message]
+    if "gene_annotation" in roles:
+        warnings = [
+            message for message in warnings
+            if "未发现 GTF" not in message and "均未发现基因注释" not in message
+        ]
+
+    return DatasetScan(
+        root=" | ".join(scan.root for scan in scans),
+        files=files,
+        reference=dict(reference_scan.reference),
+        gene=gene_location,
+        chromosomes=chromosomes,
+        resolutions=resolutions,
+        capabilities=_capabilities(files),
+        missing=missing,
+        warnings=warnings,
+    )
 
 
 def _session_or_404(service: WorkspaceService, session_id: str) -> FigureSession:
@@ -1189,6 +1482,790 @@ def _default_workflow_selection_paths(scan: DatasetScan, figure_type: str) -> li
             seen.add(key)
             selected.append(file.path)
     return selected
+
+
+def _chat_workflow_type(message: str) -> Optional[str]:
+    """Map a natural-language drawing request to a registered CFIZZ workflow.
+
+    This is intentionally a small, deterministic vocabulary layer.  It does
+    not draw anything and it never invents a renderer: every returned ID must
+    exist in :mod:`figure_types`, after which the normal workflow resolver and
+    the CFIZZ adapter perform validation.  An AI planner can still handle
+    requests that are too ambiguous for these aliases.
+    """
+    text = str(message or "").casefold()
+    explicit = SimpleIntentInterpreter._parse_explicit_workflow(text)
+    if explicit:
+        # The intent parser returns ``(figure_id, label)``.  Chat requests
+        # carry only the registered ID; passing the tuple through would make
+        # the subsequent catalogue lookup fail with a stringified tuple.
+        return str(explicit[0])
+
+    # Exact catalogue IDs/labels are useful for power users who copy a
+    # workflow name from the data panel or documentation.
+    for item in figure_type_catalog():
+        figure_id = str(item.get("id") or "")
+        label = str(item.get("label") or "").casefold()
+        if figure_id and figure_id.casefold() in text:
+            return figure_id
+        if label and label in text:
+            return figure_id
+
+    multi = any(token in text for token in ("双样本", "多样本", "两样本", "两个样本", "对比", "比较", "comparison"))
+    diff = any(token in text for token in ("差异", "differential", "gain", "lost", "shift"))
+
+    if "compartment" in text or "区室" in text or "a/b" in text or "a／b" in text:
+        if diff and any(token in text for token in ("散点", "scatter")):
+            return "compartment_diff_scatter"
+        if diff and any(token in text for token in ("区域", "热图", "region")):
+            return "compartment_diff_region"
+        if any(token in text for token in ("saddle", "鞍形", "鞍")):
+            return "compartment_saddle"
+        if any(token in text for token in ("e1", "特征向量", "eigenvector")):
+            return "compartment_eigenvector"
+        if multi:
+            return "compartment_multi"
+        return "compartment"
+
+    if "tad" in text or "绝缘" in text or "边界" in text:
+        if diff and any(token in text for token in ("分类", "堆叠", "stacked")):
+            return "tad_diff_stacked"
+        if diff and any(token in text for token in ("pileup", "聚合")):
+            return "tad_diff_pileup"
+        if diff and any(token in text for token in ("区域", "热图", "region")):
+            return "tad_diff_region"
+        if any(token in text for token in ("pileup", "聚合")):
+            return "tad_boundary_pileup"
+        if multi:
+            return "tad_multi"
+        if any(token in text for token in ("边界", "boundary", "方形", "square")) and "绝缘" not in text and "insulation" not in text:
+            return "tad_boundary_square"
+        return "tad_insulation"
+
+    if "loop" in text or "环" in text:
+        if diff and any(token in text for token in ("apa", "聚合")):
+            return "loop_diff_apa"
+        if diff and any(token in text for token in ("区域", "热图", "region")):
+            return "loop_diff_region"
+        if diff and any(token in text for token in ("分类", "堆叠", "stacked")):
+            return "loop_diff_stacked"
+        if any(token in text for token in ("apa", "聚合")):
+            return "loop_apa_multi" if multi else "loop_apa"
+        return "loop_multi" if multi else "loop_heatmap"
+
+    # Keep the generic multi-omics alias after the more specific Hi-C,
+    # compartment, TAD and Loop branches.  Otherwise a request such as
+    # “多组学 TAD 对比” was silently routed to the generic tracks view.
+    if any(token in text for token in ("多组学", "multi-omics", "multiomics", "整合图", "综合图", "轨道整合")):
+        return "tracks_integrated"
+
+    if any(token in text for token in ("bigwig", "bw信号", "信号轨道")):
+        return "tracks_signal"
+    if any(token in text for token in ("gtf", "gff", "基因轨道", "基因注释")) and "hic" not in text and "hi-c" not in text:
+        return "tracks_genes"
+    if any(token in text for token in ("bed区间", "增强子", "peak轨道", "区间轨道")) and "hic" not in text and "hi-c" not in text:
+        return "tracks_intervals"
+    if any(token in text for token in ("混合轨道", "多个轨道")):
+        return "tracks_mixed"
+
+    if "hic" in text or "hi-c" in text or "热图" in text or "foxj1" in text:
+        if multi and any(token in text for token in ("三角", "triangle", "foxj1")):
+            return "hic_triangle_multi"
+        if multi and any(token in text for token in ("方形", "square")):
+            return "hic_multi"
+        if any(token in text for token in ("方形", "square")):
+            return "hic_square"
+        if any(token in text for token in ("o/e", "oe", "observed/expected")):
+            return "hic_oe"
+        return "hic_triangle"
+    return None
+
+
+def _chat_path_parent(raw_path: str) -> str:
+    """Get a parent path while preserving Windows spelling on any host."""
+    value = str(raw_path or "").strip().strip("'\"")
+    if not value:
+        return value
+    if value.endswith(("/", "\\")):
+        return value.rstrip("/\\")
+    match = re.match(r"^(.*)[\\/]([^\\/]+)$", value)
+    return match.group(1) if match else value
+
+
+def _chat_extract_paths(message: str) -> tuple[list[str], Optional[str]]:
+    """Extract explicit data files (or a directory) from a chat sentence.
+
+    Chat-driven workflows may start from a companion file rather than a
+    matrix: for example, a user can provide a ``boundaries.tsv`` or a
+    ``signal.bw`` path.  Keep the full path as an explicit input and use its
+    parent only as the scan root, so the normal contract validator still
+    decides whether the file is valid for the requested CFIZZ workflow.
+    """
+    text = str(message or "")
+    quoted = re.findall(r"['\"]([^'\"]+)['\"]", text)
+    # Pasted Windows/POSIX directories are often not quoted.  Capture a
+    # path-looking token up to whitespace or Chinese/ASCII sentence
+    # punctuation; quoted paths above still support spaces in directory
+    # names without ambiguity.
+    unquoted_paths = re.findall(
+        r"(?i)(?:(?:[a-z]:[\\/])|(?:/)|(?:\.\.?[\\/]))[^\s，。；,;]+",
+        text,
+    )
+    data_pattern = re.compile(
+        r"(?i)(?:(?:[a-z]:[\\/])|(?:/)|(?:\.\.?[\\/])|(?:demo[\\/])|(?:data[\\/]))"
+        r"[^\s，。；,;]+?\.(?:mcool|cool|tsv|bed|bedpe|bw|bigwig|gtf|gff|gff3|npy)(?:\b|$)"
+    )
+    supported_suffix = re.compile(r"(?i)\.(?:mcool|cool|tsv|bed|bedpe|bw|bigwig|gtf|gff|gff3|npy)$")
+    explicit: list[str] = []
+    for candidate in quoted + unquoted_paths + data_pattern.findall(text):
+        if supported_suffix.search(candidate.strip()):
+            if candidate.strip() not in explicit:
+                explicit.append(candidate.strip())
+
+    directory: Optional[str] = None
+    for candidate in quoted + unquoted_paths:
+        value = candidate.strip()
+        if value and not supported_suffix.search(value) and ("/" in value or "\\" in value):
+            directory = value
+            break
+    if directory is None:
+        # Relative project/data paths are common in the browser.  Keep this
+        # deliberately conservative so ordinary prose is not mistaken for a
+        # directory; absolute paths and quoted paths remain fully supported.
+        match = re.search(
+            r"(?i)((?:demo|data|cases|examples)[\\/][^\s，。；,;]+(?:[\\/][^\s，。；,;]+)*)",
+            text,
+        )
+        if match:
+            value = match.group(1).rstrip("，。；,;.)]")
+            if not supported_suffix.search(value):
+                directory = value
+    if explicit and directory is None:
+        directory = _chat_path_parent(explicit[0])
+    return explicit, directory
+
+
+def _chat_workflow_request(
+    message: str,
+    history: list[Dict[str, str]],
+    session: FigureSession,
+    *,
+    figure_type_override: Optional[str] = None,
+    allow_without_draw_words: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Parse a chat-only workflow request before the general AI intent path."""
+    figure_type = figure_type_override or _chat_workflow_type(message)
+    explicit_paths, directory = _chat_extract_paths(message)
+    compact = re.sub(r"\s+", "", str(message or "")).casefold()
+    draw_words = ("画", "绘制", "生成", "可视化", "出图", "plot", "draw", "visualiz", "workflow")
+    if figure_type is None or (
+        not allow_without_draw_words
+        and not (any(token in compact for token in draw_words) or "figure_type=" in compact)
+    ):
+        return None
+
+    # “这个目录/上面的路径” can refer to the latest path-bearing user
+    # message, which makes a second turn such as “然后画 TAD 图” natural.
+    if directory is None and not explicit_paths:
+        # A path-only turn followed by “画双样本 TAD 图” is a normal
+        # conversational workflow.  First prefer explicit references, then
+        # fall back to the most recent path-bearing user turn.  The pending
+        # confirmation below always shows the selected root and files, so the
+        # user can verify the inferred reference before anything is rendered.
+        reference_tokens = ("这个目录", "该目录", "上面的路径", "刚才的路径", "当前数据")
+        # Once the user has supplied a path in an earlier turn, a subsequent
+        # request such as “然后画双样本三角 Hi-C 对比图” should naturally
+        # reuse that path even when they do not repeat “这个目录”.  The
+        # confirmation card still exposes the inferred root and exact files,
+        # so this convenience never hides which inputs will be used.
+        use_history = (
+            any(token in compact for token in reference_tokens)
+            or allow_without_draw_words
+            or any(token in compact for token in draw_words)
+        )
+        if use_history:
+            for entry in reversed(history):
+                if entry.get("role") != "user":
+                    continue
+                old_explicit, old_directory = _chat_extract_paths(entry.get("content", ""))
+                if old_explicit:
+                    explicit_paths, directory = old_explicit, _chat_path_parent(old_explicit[0])
+                    break
+                if old_directory:
+                    directory = old_directory
+                    break
+    if directory is None and not explicit_paths:
+        # A current FigureSpec may already provide a data root.  This is only
+        # a fallback for conversational follow-up; a first request still
+        # needs a path so the user sees exactly what will be used.
+        source_paths = [str(source.get("path")) for source in session.current_spec.get("data_sources", []) if source.get("path")]
+        if source_paths and any(token in compact for token in ("当前图", "当前数据", "这个图", "继续")):
+            directory = _chat_path_parent(source_paths[0])
+        else:
+            return None
+
+    region = SimpleIntentInterpreter._parse_region(message)
+    resolution = SimpleIntentInterpreter._parse_resolution(message)
+    gene: Optional[str] = None
+    gene_phrase = re.search(r"(?i)(?:基因|gene)\s*(?:是|为|叫|用|附近|区域)?\s*([A-Za-z][A-Za-z0-9_.-]{1,})", message)
+    if gene_phrase:
+        candidate = gene_phrase.group(1)
+        if candidate.casefold() not in {"区域", "附近", "轨道", "图", "annotation"}:
+            gene = candidate
+    if gene is None and any(token in message for token in ("基因", "gene")):
+        uppercase = re.findall(r"\b[A-Z][A-Z0-9-]{1,}\b", message)
+        ignored = {"HIC", "CFIZZ", "TAD", "LOOP", "BED", "GTF", "GFF", "API", "DNA", "RNA"}
+        gene = next((value for value in uppercase if value not in ignored), None)
+
+    return {
+        "figure_type": figure_type,
+        "explicit_paths": explicit_paths,
+        "dataset_path": directory,
+        "query": region or gene,
+        "gene": None if region else gene,
+        "region": region,
+        "resolution": resolution,
+        "message": message,
+    }
+
+
+def _chat_file_key(path: str) -> str:
+    return str(path).replace("\\", "/").rstrip("/").casefold()
+
+
+def _chat_match_selected_file(scan: DatasetScan, raw_path: str, inspector: DataInspector, project_root: Path):
+    value = str(raw_path or "").strip().strip("'\"")
+    candidate = inspector.platform_path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = project_root / candidate
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        resolved = candidate
+    wanted = {_chat_file_key(str(resolved)), _chat_file_key(value), _chat_file_key(Path(value).name)}
+    for item in scan.files:
+        keys = {_chat_file_key(item.path), _chat_file_key(item.name)}
+        try:
+            keys.add(_chat_file_key(str(Path(item.path).resolve())))
+        except OSError:
+            pass
+        if wanted & keys:
+            return item
+    return None
+
+
+_CHAT_COMPANION_KINDS = {
+    "compartment": "compartment",
+    "oe": "oe",
+    "insulation": "insulation",
+    "boundaries": "boundaries",
+    "loops": "loops",
+}
+_CHAT_TRACK_ROLES = {"signal", "gene_annotation", "intervals"}
+
+
+def _chat_sample_key(value: Any) -> str:
+    """Normalize a sample label for conservative companion matching."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _chat_candidate_for_anchor(
+    anchor: Optional[Any],
+    role: str,
+    candidates: list[Any],
+    selected_keys: set[str],
+) -> Optional[Any]:
+    """Return one unambiguous, sample-matched companion candidate.
+
+    The browser's directory picker can show every file, but a conversational
+    request must not silently choose a random resolution or another sample.
+    Prefer the same companion discovered by CFIZZ's companion resolver; then
+    use the sample labels emitted by :func:`scan_dataset`.  A tie is returned
+    as ``None`` so the caller can ask the user to choose explicitly.
+    """
+    available = [
+        candidate for candidate in candidates
+        if _chat_file_key(candidate.path) not in selected_keys
+    ]
+    if not available:
+        return None
+
+    discovered_key: Optional[str] = None
+    if anchor is not None and role in _CHAT_COMPANION_KINDS:
+        try:
+            discovered = discover_companion(anchor.path, _CHAT_COMPANION_KINDS[role])
+        except (OSError, ValueError):
+            discovered = None
+        if discovered is not None:
+            discovered_key = _chat_file_key(str(discovered.path))
+            try:
+                discovered_key = _chat_file_key(str(discovered.path.resolve()))
+            except OSError:
+                pass
+
+    anchor_sample = _chat_sample_key(
+        getattr(anchor, "sample", None) or (Path(anchor.path).stem if anchor is not None else "")
+    )
+    scored: list[tuple[int, Any]] = []
+    for candidate in available:
+        candidate_keys = {_chat_file_key(candidate.path), _chat_file_key(candidate.name)}
+        try:
+            candidate_keys.add(_chat_file_key(str(Path(candidate.path).resolve())))
+        except OSError:
+            pass
+        candidate_sample = _chat_sample_key(
+            getattr(candidate, "sample", None) or Path(candidate.path).stem
+        )
+        score = 0
+        if discovered_key and discovered_key in candidate_keys:
+            score += 100_000
+        if anchor_sample and candidate_sample == anchor_sample:
+            score += 1_000
+        elif anchor_sample and candidate_sample and anchor_sample in candidate_sample:
+            score += 700
+        elif anchor_sample and candidate_sample and candidate_sample in anchor_sample:
+            score += 500
+        # These are useful tie-breakers only after the sample/discovery score;
+        # they never make an unrelated sample look like a valid match.
+        name = candidate.name.casefold()
+        if role == "boundaries" and ".10b.boundaries" in name:
+            score += 10
+        if role == "loops" and ".loops." in name:
+            score += 10
+        scored.append((score, candidate))
+
+    scored.sort(key=lambda value: (-value[0], value[1].name.casefold(), value[1].path.casefold()))
+    if not scored or scored[0][0] <= 0:
+        return None
+    if len(scored) > 1 and scored[0][0] == scored[1][0]:
+        return None
+    return scored[0][1]
+
+
+def _chat_auto_companion_allowed(figure_type: str, role: str) -> bool:
+    """Whether chat may infer a regular companion for this workflow.
+
+    Differential result files are intentionally never guessed from an HIC
+    path: a normal boundary/loop table and a differential table can share the
+    same suffix while representing different analyses.  The user must name
+    those result files explicitly.  Ordinary single/multi-sample views can
+    safely use the same CFIZZ companion discovery used by the HIC endpoint.
+    """
+    if "diff" in str(figure_type).casefold() or str(figure_type) in {
+        "tad_diff_stacked", "loop_diff_stacked", "compartment_diff_scatter",
+    }:
+        return False
+    return role in _CHAT_COMPANION_KINDS
+
+
+def _chat_contract_error(item: Dict[str, Any], text: str) -> ValueError:
+    return ValueError(f"“{item.get('label', '')}”{text}请在对话中明确给出文件路径，或回到数据面板选择文件。")
+
+
+def _chat_select_workflow_files(
+    scan: DatasetScan,
+    figure_type: str,
+    explicit_paths: list[str],
+    message: str,
+    inspector: DataInspector,
+    project_root: Path,
+) -> list[str]:
+    """Select only the bounded inputs required by a chat-requested workflow."""
+    item = FIGURE_TYPE_BY_ID.get(str(figure_type)) or {}
+    contract = item.get("input_contract") or {}
+    roles = contract.get("roles") or {}
+    want_tracks = any(token in str(message).casefold() for token in ("轨道", "bigwig", "bw", "gtf", "gff", "bed", "多组学", "foxj1"))
+    selected_by_role: Dict[str, list[Any]] = {}
+    usable_by_role: Dict[str, list[Any]] = {}
+    for role in roles:
+        candidates = [
+            file for file in scan.files
+            if file.usable and file.role == str(role) and _source_type_supports_role(file.type, file.role)
+        ]
+        candidates.sort(key=lambda file: (str(file.sample or "").casefold(), file.name.casefold(), file.path.casefold()))
+        usable_by_role[str(role)] = candidates
+
+    # Keep one ordered list for both explicit-path and directory-selection
+    # branches. The explicit branch fills it while resolving companions;
+    # the directory branch fills it from ``selected_by_role`` below.
+    selected: list[str] = []
+
+    # Explicit chat paths are authoritative, but they do not disable the
+    # contract: required companions are completed only when CFIZZ can identify
+    # an unambiguous same-sample file.  This is the key difference from the old
+    # implementation, which passed a lone HIC path through and failed later in
+    # the renderer with a missing insulation/loop/E1 input.
+    if explicit_paths:
+        for raw_path in explicit_paths:
+            matched = _chat_match_selected_file(scan, raw_path, inspector, project_root)
+            if matched is None or not matched.usable:
+                raise ValueError(f"找不到可用的数据文件：{raw_path}。请确认路径属于扫描目录，或直接提供所在目录。")
+            if matched.path not in selected:
+                selected.append(matched.path)
+                selected_by_role.setdefault(str(matched.role), []).append(matched)
+
+        selected_keys = {_chat_file_key(path) for path in selected}
+        hic_rule = roles.get("hic") or {}
+        hic_min = int(hic_rule.get("min") or 0)
+        hic_max = hic_rule.get("max")
+        hic_items = selected_by_role.get("hic", [])
+        hic_candidates = usable_by_role.get("hic", [])
+        if hic_min and not hic_items:
+            # A direct companion path (for example boundaries.tsv) can still
+            # infer its matrix when the sample label is unique.  Never choose
+            # between two unrelated HIC files without telling the user.
+            hint = next(iter(selected_by_role.values()), [None])[0]
+            candidate = _chat_candidate_for_anchor(hint, "hic", hic_candidates, selected_keys)
+            if candidate is None:
+                if len(hic_candidates) == 1:
+                    candidate = hic_candidates[0]
+                else:
+                    raise _chat_contract_error(item, f"需要至少 {hic_min} 个 Hi-C 文件，当前路径无法唯一对应到 Hi-C。")
+            selected.append(candidate.path)
+            selected_by_role.setdefault("hic", []).append(candidate)
+            selected_keys.add(_chat_file_key(candidate.path))
+            hic_items = selected_by_role["hic"]
+        if hic_min and len(hic_items) < hic_min:
+            raise _chat_contract_error(item, f"至少需要 {hic_min} 个 Hi-C 文件，当前只明确选择了 {len(hic_items)} 个。")
+        if hic_max is not None and len(hic_items) > int(hic_max):
+            raise _chat_contract_error(item, f"最多只能选择 {int(hic_max)} 个 Hi-C 文件，当前选择了 {len(hic_items)} 个。")
+
+        anchor_count = len(hic_items)
+        for role, rule in roles.items():
+            role = str(role)
+            if role == "hic":
+                continue
+            rule = rule or {}
+            minimum = int(rule.get("min") or 0)
+            per_anchor = bool(rule.get("per_anchor"))
+            current = len(selected_by_role.get(role, []))
+            if minimum <= current:
+                continue
+            if not _chat_auto_companion_allowed(figure_type, role):
+                label = str(rule.get("label") or role)
+                raise _chat_contract_error(item, f"还需要明确选择 {label} 文件；差异分析不会自动猜测结果文件。")
+            if per_anchor and anchor_count == 0:
+                raise _chat_contract_error(item, f"需要先选择 Hi-C 样本，才能为每个样本配对 {role} 文件。")
+            candidates = usable_by_role.get(role, [])
+            anchors = hic_items if per_anchor else [hic_items[0] if hic_items else None]
+            desired = anchor_count * max(1, minimum) if per_anchor else minimum - current
+            added = 0
+            for anchor in anchors:
+                for _ in range(max(1, minimum) if per_anchor else desired):
+                    candidate = _chat_candidate_for_anchor(anchor, role, candidates, selected_keys)
+                    if candidate is None:
+                        label = str(rule.get("label") or role)
+                        raise _chat_contract_error(item, f"无法唯一找到与样本对应的 {label} 文件。")
+                    selected.append(candidate.path)
+                    selected_by_role.setdefault(role, []).append(candidate)
+                    selected_keys.add(_chat_file_key(candidate.path))
+                    added += 1
+            if added < desired:
+                label = str(rule.get("label") or role)
+                raise _chat_contract_error(item, f"需要 {desired} 个 {label} 文件，但只找到 {added} 个可唯一配对的文件。")
+
+        # Optional tracks are opt-in.  If the user says “加轨道/多组学” while
+        # naming only the HIC path, add at most one same-sample candidate per
+        # track role.  If they did not ask for tracks, leave optional roles
+        # untouched so a bare Hi-C request stays a bare Hi-C request.
+        if want_tracks:
+            anchor = (selected_by_role.get("hic") or [None])[0]
+            for role in _CHAT_TRACK_ROLES & set(roles):
+                if selected_by_role.get(role):
+                    continue
+                candidate = _chat_candidate_for_anchor(anchor, role, usable_by_role.get(role, []), selected_keys)
+                if candidate is not None:
+                    selected.append(candidate.path)
+                    selected_by_role.setdefault(role, []).append(candidate)
+                    selected_keys.add(_chat_file_key(candidate.path))
+
+        for group in contract.get("any_of") or []:
+            group_roles = [str(role) for role in group.get("roles") or []]
+            minimum = int(group.get("min") or 0)
+            if sum(len(selected_by_role.get(role, [])) for role in group_roles) >= minimum:
+                continue
+            if want_tracks:
+                anchor = (selected_by_role.get("hic") or [None])[0]
+                for role in group_roles:
+                    candidate = _chat_candidate_for_anchor(anchor, role, usable_by_role.get(role, []), selected_keys)
+                    if candidate is None:
+                        continue
+                    selected.append(candidate.path)
+                    selected_by_role.setdefault(role, []).append(candidate)
+                    selected_keys.add(_chat_file_key(candidate.path))
+                    break
+            if sum(len(selected_by_role.get(role, [])) for role in group_roles) < minimum:
+                labels = "、".join(str(role) for role in group_roles)
+                raise _chat_contract_error(item, f"至少需要 {minimum} 个以下类型之一的文件：{labels}。")
+        return selected
+
+    hic_rule = roles.get("hic") or {}
+    hic_candidates = usable_by_role.get("hic", [])
+    hic_max = hic_rule.get("max")
+    hic_min = int(hic_rule.get("min") or 0)
+    if hic_candidates:
+        if hic_max is not None and int(hic_max) == hic_min:
+            hic_count = hic_min
+        elif hic_min >= 2:
+            hic_count = hic_min
+        else:
+            hic_count = 1
+        if len(hic_candidates) < hic_count:
+            raise ValueError(f"“{item.get('label', figure_type)}”需要 {hic_count} 个可用 Hi-C 文件，当前目录只有 {len(hic_candidates)} 个。")
+        selected_by_role["hic"] = hic_candidates[:hic_count]
+
+    anchor_count = len(selected_by_role.get("hic", []))
+    for role, rule in roles.items():
+        role = str(role)
+        if role == "hic":
+            continue
+        candidates = usable_by_role.get(role, [])
+        minimum = int((rule or {}).get("min") or 0)
+        per_anchor = bool((rule or {}).get("per_anchor"))
+        if role in {"signal", "gene_annotation", "intervals"} and not want_tracks and minimum == 0:
+            continue
+        if per_anchor:
+            desired = anchor_count * max(1, minimum)
+        elif minimum:
+            desired = minimum
+        else:
+            # Optional tracks are opt-in from chat and are intentionally
+            # bounded to one representative file per role unless paths are
+            # explicitly named.
+            desired = 1 if want_tracks else 0
+        maximum = (rule or {}).get("max")
+        if maximum is not None:
+            desired = min(desired, int(maximum) * max(1, anchor_count) if per_anchor else int(maximum))
+        if len(candidates) < desired:
+            label = str((rule or {}).get("label") or role)
+            raise ValueError(f"“{item.get('label', figure_type)}”需要 {desired} 个{label}文件，但目录中只有 {len(candidates)} 个可用文件。请上传或明确指定文件。")
+        selected_by_role[role] = candidates[:desired]
+
+    for role in roles:
+        selected.extend(file.path for file in selected_by_role.get(str(role), []))
+    if not selected:
+        # Workflows without a Hi-C anchor (for example result-only
+        # differential plots) still use the same contract-driven selector.
+        selected = _default_workflow_selection_paths(scan, figure_type)
+    if not selected:
+        raise ValueError(f"目录中没有发现可用于“{item.get('label', figure_type)}”的输入文件。")
+    return selected
+
+
+def _chat_expand_scan_root(
+    service: WorkspaceService,
+    raw_root: str,
+    explicit_paths: list[str],
+    figure_type: str,
+) -> Path:
+    """Widen a chat scan to the CFIZZ experiment root when necessary.
+
+    A user commonly pastes ``.../data/sample.mcool`` even though CFIZZ's
+    generated insulation, loop, boundary, or E1 files live beside ``data``
+    under ``1_3_hicviz_output``.  The UI's directory scanner sees the whole
+    experiment, but a chat request used to scan only the HIC's parent and then
+    reported a misleading missing-file error.  Expand only to the smallest
+    common ancestor containing the HIC and discovered companions; plain Hi-C
+    workflows retain their narrow scan root.
+    """
+    root = service.inspector.platform_path(raw_root).expanduser()
+    if not root.is_absolute():
+        root = service.project_root / root
+    root = root.resolve()
+    if root.is_file():
+        root = root.parent
+
+    item = FIGURE_TYPE_BY_ID.get(str(figure_type)) or {}
+    roles = (item.get("input_contract") or {}).get("roles") or {}
+    companion_roles = [
+        str(role) for role, rule in roles.items()
+        if str(role) in _CHAT_COMPANION_KINDS and int((rule or {}).get("min") or 0) > 0
+    ]
+    if not companion_roles:
+        return root
+
+    def resolved_input(raw_path: str) -> Optional[Path]:
+        candidate = service.inspector.platform_path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = service.project_root / candidate
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            return None
+        return candidate if candidate.is_file() else None
+
+    explicit_files = [path for raw_path in explicit_paths if (path := resolved_input(raw_path))]
+    hic_paths = [
+        path for path in explicit_files
+        if path.suffix.casefold() in {".cool", ".mcool"}
+    ]
+
+    def find_hics(directory: Path) -> list[Path]:
+        if not directory.exists() or not directory.is_dir():
+            return []
+        return sorted(
+            (path for path in directory.rglob("*") if path.is_file() and path.suffix.casefold() in {".cool", ".mcool"}),
+            key=lambda path: str(path).casefold(),
+        )[:64]
+
+    if not hic_paths:
+        hic_paths = find_hics(root)
+    # If a companion path was pasted from a nested result directory, look up
+    # to three experiment parents for its HIC anchors.  This mirrors the
+    # bounded search policy in companions._search_roots without scanning the
+    # entire project tree.
+    if not hic_paths:
+        for parent in [root, *list(root.parents)[:3]]:
+            candidates = find_hics(parent)
+            if candidates:
+                root = parent
+                hic_paths = candidates
+                break
+
+    candidate_roots = [root]
+    for hic_path in hic_paths:
+        for role in companion_roles:
+            try:
+                companion = discover_companion(hic_path, _CHAT_COMPANION_KINDS[role])
+            except (OSError, ValueError):
+                companion = None
+            if companion is not None:
+                candidate_roots.append(companion.path.parent.resolve())
+    try:
+        common = Path(os.path.commonpath([str(path) for path in candidate_roots])).resolve()
+    except (OSError, ValueError):
+        common = root
+    if common.is_file():
+        common = common.parent
+    return common
+
+
+def _chat_prepare_workflow(
+    service: WorkspaceService,
+    session: FigureSession,
+    request: Dict[str, Any],
+) -> tuple[Dict[str, Any], list[str], list[Dict[str, Any]], Dict[str, Any]]:
+    """Build a temporary spec exactly as the fixed workflow endpoint does."""
+    figure_type = str(request["figure_type"])
+    item = FIGURE_TYPE_BY_ID.get(figure_type)
+    if item is None or not item.get("ready"):
+        raise ValueError("该 CFIZZ 工作流未登记或当前不可执行。")
+    raw_root = str(request.get("dataset_path") or "").strip()
+    root = _chat_expand_scan_root(
+        service, raw_root, list(request.get("explicit_paths") or []), figure_type,
+    )
+    service.inspector.authorize_root(str(root))
+    scan = scan_dataset(
+        str(root), service.inspector, service.references,
+        # A genomic interval is a viewport request, not a gene lookup.  Only
+        # pass an actual gene symbol to the dataset scanner; otherwise a
+        # string/tuple such as ("chr1", 0, 2_000_000) can be misinterpreted
+        # as a gene query and produce misleading annotation warnings.
+        gene=request.get("gene"), build="hg38",
+    )
+    selected_paths = _chat_select_workflow_files(
+        scan, figure_type, list(request.get("explicit_paths") or []), request.get("message", ""),
+        service.inspector, service.project_root,
+    )
+    selected_scan = select_dataset_files(scan, selected_paths)
+    bindings: list[Dict[str, Any]] = []
+    pairing = ((item.get("input_contract") or {}).get("pairing") or {})
+    if pairing:
+        anchor_role = str(pairing.get("anchor_role") or "hic")
+        companion_roles = [str(value) for value in pairing.get("companion_roles") or []]
+        anchors = [file for file in selected_scan.files if file.usable and file.role == anchor_role]
+        by_role: Dict[str, list[Any]] = {}
+        for file in selected_scan.files:
+            if file.usable:
+                by_role.setdefault(file.role, []).append(file)
+        bindings = _suggest_workflow_bindings(anchors, by_role, companion_roles)
+        if len(bindings) != len(anchors):
+            # Let the canonical validator produce the detailed “sample X is
+            # missing role Y” message instead of silently pairing by order.
+            prepare_workflow_selection(selected_scan, figure_type, [], False)
+        selected_scan, normalized = prepare_workflow_selection(selected_scan, figure_type, bindings, True)
+        bindings = normalized
+    else:
+        selected_scan, bindings = prepare_workflow_selection(selected_scan, figure_type, [], False)
+
+    requires_hic = _workflow_requires_hic(figure_type)
+    if not requires_hic:
+        selected_scan = replace(
+            selected_scan,
+            missing=[message for message in selected_scan.missing if "cool" not in message.lower() and "mcool" not in message.lower()],
+        )
+        spec = build_workflow_spec(
+            selected_scan, session.session_id, figure_type, service.references,
+            gene=request.get("gene"), build="hg38", resolution=request.get("resolution"),
+        )
+    else:
+        spec = build_integrated_spec(
+            selected_scan, session.session_id, service.references,
+            gene=request.get("gene"), build="hg38", resolution=request.get("resolution"),
+        )
+    if bindings:
+        spec.setdefault("metadata", {})["workflow_bindings"] = bindings
+    if request.get("region"):
+        chrom, start, end = request["region"]
+        spec.setdefault("viewport", {}).update({
+            "chrom": chrom, "start": int(start), "end": int(end),
+            "focus_label": f"{chrom}:{int(start):,}-{int(end):,}",
+        })
+        spec.setdefault("metadata", {})["viewport_selection"] = "explicit_user_region"
+    elif requires_hic and not request.get("gene"):
+        _auto_default_viewport(spec, figure_type, service.inspector)
+
+    working = FigureSession(f"{session.session_id}_chat_workflow", spec, validator=service.validator)
+    source_ids = [str(source.get("id")) for source in spec.get("data_sources", []) if source.get("id")]
+    workflow_intent = IntentResult(
+        "workflow", f"准备执行 CFIZZ 工作流：{item['label']}。",
+        {"workflow_request": {"figure_type": figure_type, "source_ids": source_ids, "options": {}}},
+        planner="chat:workflow",
+    )
+    resolved = _resolve_ai_workflow_intent(working, workflow_intent)
+    if resolved.action != "patch" or not resolved.patch:
+        raise ValueError(resolved.reply)
+    patch = _augment_compartment_patch(resolved.patch, working.current_spec, service.inspector)
+    working.apply_patch(patch)
+    return working.current_spec, selected_paths, bindings, item
+
+
+def _chat_workflow_confirmation(
+    service: WorkspaceService,
+    session: FigureSession,
+    request: Dict[str, Any],
+) -> IntentResult:
+    """Prepare, explain, and hold a chat workflow until the user confirms."""
+    try:
+        spec, selected_paths, bindings, item = _chat_prepare_workflow(service, session, request)
+    except (OSError, PermissionError, ValueError) as exc:
+        return IntentResult("clarify", f"我识别到了这个绘图请求，但固定 CFIZZ 工作流暂时不能执行：{exc}", planner="chat:workflow")
+    viewport = spec.get("viewport") or {}
+    region = f"{viewport.get('chrom', '—')}:{int(viewport.get('start', 0)):,}-{int(viewport.get('end', 0)):,}"
+    resolution = (spec.get("analysis") or {}).get("resolution")
+    names = "、".join(Path(path).name for path in selected_paths)
+    pairing_text = ""
+    if bindings:
+        pairs = []
+        for binding in bindings:
+            companions = "、".join(Path(value).name for value in (binding.get("companions") or {}).values())
+            pairs.append(f"{Path(binding.get('anchor_path', '')).name} → {companions}")
+        pairing_text = "\n样本配对：" + "；".join(pairs)
+    reply = (
+        f"我识别到你的请求：使用“{item['label']}”（CFIZZ：{item['entrypoint']}）。\n"
+        f"数据路径：{request.get('dataset_path')}\n"
+        f"将使用文件：{names}\n"
+        f"区域：{region}；分辨率：{int(resolution):,} bp。"
+        f"{pairing_text}\n"
+        "请回复“确认”开始调用固定 CFIZZ 工作流；回复“取消”放弃。生成后仍可继续用自然语言修改。"
+    )
+    service.pending_actions[session.session_id] = {
+        "kind": "workflow",
+        "spec": deepcopy(spec),
+        "summary": f"使用聊天确认的数据生成 {item['label']}",
+        "apply_reply": f"已确认，将使用上述文件调用 CFIZZ 官方工作流生成“{item['label']}”。",
+    }
+    return IntentResult("clarify", reply, planner="chat:workflow")
 
 
 def _auto_default_viewport(spec: Dict[str, Any], figure_type: str, inspector: DataInspector) -> None:
@@ -1439,7 +2516,10 @@ def _augment_compartment_patch(patch: Dict[str, Any], spec: Dict[str, Any], insp
         operations.append({"op": "update", "target_kind": "figure", "field": "title", "value": expected_title})
     viewport = spec.get("viewport", {})
     focus_label = str(viewport.get("focus_label") or "")
-    explicit_region = bool(re.match(r"(?i)^chr[0-9xywm]+:\s*\d", focus_label))
+    # A gene name and a chromosome/range are both explicit user choices.
+    # Automatic broad compartment windows are only appropriate when no focus
+    # was supplied at all.
+    explicit_region = bool(focus_label)
     if feature_paths:
         suggestion = suggest_selected_viewport(
             feature_paths,
@@ -1733,7 +2813,7 @@ def _resolve_ai_reference_intent(
             planner=f"{intent.planner}:reference-invalid",
         )
     # Keep an auditable trace that semantic classification came from AI while
-    # coordinates and files were resolved by the local hg38 registry.
+    # coordinates and files were resolved by the selected local reference.
     return IntentResult(
         resolved.action,
         resolved.reply,
@@ -1741,6 +2821,16 @@ def _resolve_ai_reference_intent(
         requires_confirmation=resolved.requires_confirmation,
         planner=f"{intent.planner}→{resolved.planner}",
     )
+
+
+def _session_reference_build(session: FigureSession) -> str:
+    reference = session.current_spec.get("metadata", {}).get("reference", {})
+    return str(reference.get("id") or reference.get("build") or "hg38")
+
+
+def _reference_annotation_label(service: WorkspaceService, build: str) -> str:
+    reference = service.references._build(build)
+    return f"{reference.annotation_release or reference.assembly} / {build}"
 
 
 def _reference_gene_intent(service: WorkspaceService, session: FigureSession, message: str) -> Optional[IntentResult]:
@@ -1764,14 +2854,15 @@ def _reference_gene_intent(service: WorkspaceService, session: FigureSession, me
     ))
     if visual_problem or not location_request:
         return None
-    location = service.references.locate_gene(gene)
+    build = _session_reference_build(session)
+    location = service.references.locate_gene(gene, build)
     if location is None:
-        suggestions = service.references.suggest_genes(gene)
+        suggestions = service.references.suggest_genes(gene, build)
         suggestion = f"。你是否想输入：{'、'.join(suggestions)}？" if suggestions else "。请检查基因符号或 Ensembl gene ID。"
         return IntentResult(
             "clarify",
-            f"项目完整 hg38 注释中没有找到 {gene}{suggestion}",
-            planner="reference:hg38",
+            f"项目 {build} 注释中没有找到 {gene}{suggestion}",
+            planner=f"reference:{build}",
         )
 
     sources = {
@@ -1790,8 +2881,8 @@ def _reference_gene_intent(service: WorkspaceService, session: FigureSession, me
     if not supported_chrom:
         return IntentResult(
             "answer",
-            f"参考注释中 {location.gene} 位于 {location.chrom}:{location.start:,}-{location.end:,}（hg38），但当前 Hi-C 数据不包含 {location.chrom}，因此不能直接切换。请载入包含 {location.chrom} 的 Hi-C 文件。",
-            planner="reference:hg38",
+            f"参考注释中 {location.gene} 位于 {location.chrom}:{location.start:,}-{location.end:,}（{build}），但当前 Hi-C 数据不包含 {location.chrom}，因此不能直接切换。请载入包含 {location.chrom} 的 Hi-C 文件。",
+            planner=f"reference:{build}",
         )
 
     window = 500_000
@@ -1808,12 +2899,12 @@ def _reference_gene_intent(service: WorkspaceService, session: FigureSession, me
     }
     service.pending_actions[session.session_id] = {
         "patch": patch,
-        "apply_reply": f"已切换到 {location.gene} 附近区域 {supported_chrom}:{start:,}-{end:,}（hg38）；当前图中的 Hi-C 图层保持不变。",
+        "apply_reply": f"已切换到 {location.gene} 附近区域 {supported_chrom}:{start:,}-{end:,}（{build}）；当前图中的 Hi-C 图层保持不变。",
     }
     return IntentResult(
         "clarify",
-        f"可以。项目参考 {location.source} 中 {location.gene} 位于 {location.chrom}:{location.start:,}-{location.end:,}（hg38）。我建议切换到 {supported_chrom}:{start:,}-{end:,}，保留当前 Hi-C 图层；回复“确定”后执行。",
-        planner="reference:hg38",
+        f"可以。项目参考 {location.source} 中 {location.gene} 位于 {location.chrom}:{location.start:,}-{location.end:,}（{build}）。我建议切换到 {supported_chrom}:{start:,}-{end:,}，保留当前 Hi-C 图层；回复“确定”后执行。",
+        planner=f"reference:{build}",
     )
 
 
@@ -1842,13 +2933,14 @@ def _region_gene_annotation_intent(
             planner="reference:renderer-capability",
         )
     viewport = spec.get("viewport", {})
+    build = _session_reference_build(session)
     chrom = str(viewport.get("chrom") or "")
     start = int(viewport.get("start", 0))
     end = int(viewport.get("end", 0))
     try:
-        track_path = service.references.region_annotation_track(chrom, start, end)
+        track_path = service.references.region_annotation_track(chrom, start, end, build)
     except ValueError as exc:
-        return IntentResult("answer", str(exc), planner="reference:hg38")
+        return IntentResult("answer", str(exc), planner=f"reference:{build}")
     # Match CFIZZ examples/integrated/7_3_multi_gene.py: multi-gene GTF
     # height is 0.5 cm per row, capped at seven rows.
     gene_count = service.references.annotation_gene_count(track_path)
@@ -1864,10 +2956,11 @@ def _region_gene_annotation_intent(
     )
     operations = []
     if gene_layer is None:
-        source_id = "reference_genes_hg38"
+        source_id = f"reference_genes_{build}"
+        reference_label = _reference_annotation_label(service, build)
         panel = next((panel for panel in spec.get("panels", []) if panel.get("id") == "annotation_panel"), None)
         operations.append({"op": "add_source", "source": {
-            "id": source_id, "type": "gtf", "path": track_path, "label": "区域基因 · Ensembl 110 / hg38",
+            "id": source_id, "type": "gtf", "path": track_path, "label": f"区域基因 · {reference_label}",
         }})
         if panel is None:
             operations.append({"op": "add_panel", "panel": {
@@ -1885,10 +2978,10 @@ def _region_gene_annotation_intent(
         source_id = gene_layer.get("source_id")
         source = next((item for item in spec.get("data_sources", []) if item.get("id") == source_id), None)
         if source is None:
-            return IntentResult("answer", "当前基因轨道引用的数据源不存在，无法切换为区域注释。", planner="reference:hg38")
+            return IntentResult("answer", "当前基因轨道引用的数据源不存在，无法切换为区域注释。", planner=f"reference:{build}")
         operations.extend([
             {"op": "update", "target_kind": "source", "target_id": source_id, "field": "path", "value": track_path},
-            {"op": "update", "target_kind": "source", "target_id": source_id, "field": "label", "value": "区域基因 · Ensembl 110 / hg38"},
+            {"op": "update", "target_kind": "source", "target_id": source_id, "field": "label", "value": f"区域基因 · {_reference_annotation_label(service, build)}"},
             {"op": "update", "target_kind": "layer", "target_id": gene_layer["id"], "field": "label", "value": "区域内全部基因"},
             {"op": "update", "target_kind": "layer", "target_id": gene_layer["id"], "field": "height_cm", "value": gene_track_height},
         ])
@@ -1899,19 +2992,40 @@ def _region_gene_annotation_intent(
             })
     return IntentResult(
         "patch",
-        f"将使用项目完整 Ensembl 110 / hg38 GTF，标出当前区域 {chrom}:{start:,}-{end:,} 内的全部基因；Hi-C 和信号轨道保持不变。",
+        f"将使用项目完整 {_reference_annotation_label(service, build)} GTF，标出当前区域 {chrom}:{start:,}-{end:,} 内的全部基因；Hi-C 和信号轨道保持不变。",
         {"summary": "显示当前区域全部基因", "operations": operations},
-        planner="reference:hg38",
+        planner=f"reference:{build}",
     )
 
 
 def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, message: str) -> Optional[IntentResult]:
     """Add a bundled/reference GTF track when the current figure lacks one."""
+    spec = session.current_spec
+    build = _session_reference_build(session)
+    reference_label = _reference_annotation_label(service, build)
+    # Prefer a GTF already attached to the current figure (for example, one
+    # discovered from a user's data directory), then fall back to the bundled
+    # annotation available for the selected reference build.
+    annotation_path = next(
+        (
+            source.get("path")
+            for source in spec.get("data_sources", [])
+            if isinstance(source, dict) and source.get("type") in {"gtf", "gff"} and source.get("path")
+        ),
+        None,
+    )
     lowered_message = message.lower()
     explicit = re.search(r"([A-Za-z][A-Za-z0-9-]{1,19})", message)
     if explicit and explicit.group(1).upper() in {"GENE", "TRACK", "ANNOTATION"}:
         explicit = None
-    explicit_location = service.references.locate_gene(explicit.group(1).upper()) if explicit else None
+    explicit_location = (
+        service.references.locate_gene(
+            explicit.group(1).upper(),
+            build,
+            annotation_path=annotation_path,
+        )
+        if explicit else None
+    )
     has_drawing_verb = any(token in lowered_message for token in (
         "画", "显示", "标出", "标注", "标上", "添加", "加上", "改成", "换成", "切换", "定位", "查看", "看",
     ))
@@ -1936,7 +3050,6 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
     )
     if not gene_drawing_command and not any(token in lowered_message for token in ("标注", "标上", "基因注释", "基因轨道", "gene annotation", "gene track")):
         return None
-    spec = session.current_spec
     current_figure_type = spec.get("figure_type")
     if not supports_integrated_tracks(current_figure_type):
         item = FIGURE_TYPE_BY_ID.get(str(current_figure_type)) or {}
@@ -1952,29 +3065,33 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
         gene = explicit_location.gene.upper()
     elif explicit:
         unknown = explicit.group(1).upper()
-        suggestions = service.references.suggest_genes(unknown)
+        suggestions = service.references.suggest_genes(unknown, build)
         suggestion = f"你是不是想输入 {'、'.join(suggestions)}？" if suggestions else "请检查拼写。"
+        if annotation_path:
+            reply = f"当前 {build} 注释文件中没有找到基因 {unknown}；{suggestion}"
+        elif service.references.has_complete_annotation(build):
+            reply = f"项目完整 {reference_label} 注释中没有找到基因 {unknown}；{suggestion}"
+        else:
+            reply = (
+                f"当前选择 {reference_label}，但项目未内置该版本的完整基因注释，无法按名称查找 {unknown}。"
+                f"请导入匹配 {build} 的 GTF/GFF。"
+            )
         return IntentResult(
             "clarify",
-            f"项目完整 hg38 注释中没有找到基因 {unknown}；{suggestion}",
-            planner="reference:hg38",
+            reply,
+            planner=f"reference:{build}",
         )
     if not gene:
-        return IntentResult("clarify", "请告诉我需要标注哪个基因，例如“标注 FOXJ1”。", planner="reference:hg38")
-    # Prefer a GTF already attached to the current figure (for example, one
-    # discovered from a user's data directory), then fall back to bundled
-    # project/reference annotation.
-    annotation_path = next(
-        (
-            source.get("path")
-            for source in spec.get("data_sources", [])
-            if isinstance(source, dict) and source.get("type") in {"gtf", "gff"} and source.get("path")
-        ),
-        None,
-    )
-    location = service.references.locate_gene(gene, annotation_path=annotation_path)
+        return IntentResult("clarify", "请告诉我需要标注哪个基因，例如“标注 FOXJ1”。", planner=f"reference:{build}")
+    location = service.references.locate_gene(gene, build, annotation_path=annotation_path)
     if location is None or not location.annotation_path:
-        return IntentResult("answer", f"项目 Ensembl 110 / GRCh38.p14 参考中没有找到 {gene}；请检查基因符号或 Ensembl gene ID。", planner="reference:hg38")
+        if annotation_path:
+            reply = f"当前 {build} 注释文件中没有找到 {gene}；请检查基因符号或 Ensembl gene ID。"
+        elif service.references.has_complete_annotation(build):
+            reply = f"项目 {reference_label} 参考中没有找到 {gene}；请检查基因符号或 Ensembl gene ID。"
+        else:
+            reply = f"当前选择 {reference_label}；请先导入匹配 {build} 的 GTF/GFF，才能按基因名标注 {gene}。"
+        return IntentResult("answer", reply, planner=f"reference:{build}")
 
     sources = spec.get("data_sources", [])
     has_gene_track = any(layer.get("kind") == "genes" for panel in spec.get("panels", []) for layer in panel.get("layers", []))
@@ -1982,7 +3099,8 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
     # on chr1:0-2M.  Treat a repeat annotation request as a request to move
     # that existing track into view, rather than returning a misleading
     # "already present" answer.
-    source_id = "reference_genes_hg38"
+    source_id = f"reference_genes_{build}"
+    reference_source_label = f"Genes · {reference_label}"
     existing_gene_layer = next(
         (
             layer
@@ -2020,7 +3138,7 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
             return IntentResult(
                 "answer",
                 f"{gene} 位于 {location.chrom}:{location.start:,}-{location.end:,}（{location.assembly}），但当前 Hi-C 文件不包含 {location.chrom}，无法在当前数据上标注。",
-                planner="reference:hg38",
+                planner=f"reference:{build}",
             )
         flank = 500_000
         chrom_sizes = inspection.metadata.get("chromsizes", {})
@@ -2037,10 +3155,10 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
     try:
         track_path = service.references.annotation_track(location, target_start, target_end)
     except ValueError as exc:
-        return IntentResult("answer", str(exc), planner="reference:hg38")
+        return IntentResult("answer", str(exc), planner=f"reference:{build}")
     if not has_gene_track:
         operations.extend([
-            {"op": "add_source", "source": {"id": source_id, "type": "gtf", "path": track_path, "label": f"Genes · Ensembl 110 / hg38"}},
+            {"op": "add_source", "source": {"id": source_id, "type": "gtf", "path": track_path, "label": reference_source_label}},
         ])
         if annotation_panel is None:
             operations.append({"op": "add_panel", "panel": {"id": "annotation_panel", "kind": "signal_tracks", "label": "Gene annotation", "height_cm": 0.5, "layers": []}})
@@ -2062,8 +3180,8 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
         )
         if existing_source and existing_source.get("type") in {"gtf", "gff"} and str(existing_source.get("path")) != str(track_path):
             operations.append({"op": "update", "target_kind": "source", "target_id": existing_source_id, "field": "path", "value": track_path})
-        if existing_source and existing_source.get("label") != "Genes · Ensembl 110 / hg38":
-            operations.append({"op": "update", "target_kind": "source", "target_id": existing_source_id, "field": "label", "value": "Genes · Ensembl 110 / hg38"})
+        if existing_source and existing_source.get("label") != reference_source_label:
+            operations.append({"op": "update", "target_kind": "source", "target_id": existing_source_id, "field": "label", "value": reference_source_label})
         if existing_gene_layer.get("label") != gene:
             operations.append({"op": "update", "target_kind": "layer", "target_id": existing_gene_layer.get("id"), "field": "label", "value": gene})
         if switching_from_region:
@@ -2079,12 +3197,16 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
     else:
         reply = f"将添加 {gene} 的 {location.assembly} 基因注释轨道，并保留当前 Hi-C 图层。"
     if any(token in message for token in ("还有其他", "还有别的", "其他可以标注", "别的可以标注")):
-        reply += f" 项目公共 Ensembl 110 参考包含 {service.references.complete_gene_count():,} 条基因记录，可继续输入其他人类基因符号或 Ensembl gene ID。"
+        gene_count = service.references.complete_gene_count(build)
+        if gene_count:
+            reply += f" 项目公共 {reference_label} 参考包含 {gene_count:,} 条基因记录，可继续输入其他基因符号或 Ensembl gene ID。"
+        elif annotation_path:
+            reply += f" 当前使用已导入的 {build} 注释；可继续输入该 GTF/GFF 中的基因符号或 gene ID。"
     return IntentResult(
         "patch",
         reply,
         {"summary": f"添加 {gene} 基因注释", "operations": operations},
-        planner="reference:hg38",
+        planner=f"reference:{build}",
     )
 
 
@@ -2114,6 +3236,7 @@ def _annotation_question_intent(
         return None
 
     spec = session.current_spec
+    build = _session_reference_build(session)
     if asks_beyond_genes or "轨道" in compact:
         layer_counts: Dict[str, int] = {}
         for panel in spec.get("panels", []):
@@ -2140,15 +3263,38 @@ def _annotation_question_intent(
             planner="reference:capabilities",
         )
 
-    if service.references.has_complete_annotation():
+    user_annotation = next(
+        (
+            source
+            for source in spec.get("data_sources", [])
+            if isinstance(source, dict) and source.get("type") in {"gtf", "gff"} and source.get("path")
+        ),
+        None,
+    )
+    if service.references.has_complete_annotation(build):
+        reference = service.references._build(build)
         return IntentResult(
             "answer",
-            f"可以。项目已配置 Ensembl 110 / GRCh38.p14 完整注释，共 {service.references.complete_gene_count():,} 条基因记录。"
-            "直接输入人类基因符号（如 TP53、MYC）或 Ensembl gene ID，Agent 会定位区域并绘制基因轨道，无需再提供 GTF。",
+            f"可以。项目已配置 {reference.annotation} 完整注释，共 {service.references.complete_gene_count(build):,} 条基因记录。"
+            "直接输入基因符号（如 TP53、MYC）或 Ensembl gene ID，Agent 会定位区域并绘制基因轨道，无需再提供 GTF。",
             planner="reference:capabilities",
         )
-    genes = service.references.bundled_gene_names()
-    return IntentResult("answer", f"当前可直接标注：{'、'.join(genes)}。", planner="reference:capabilities")
+    if user_annotation:
+        return IntentResult(
+            "answer",
+            f"当前选择 {build}，并已载入 {user_annotation.get('label') or '用户 GTF/GFF'}。"
+            "可以定位和标注该注释文件中存在的基因；请确保文件版本与数据一致。",
+            planner="reference:capabilities",
+        )
+    genes = service.references.bundled_gene_names(build)
+    if genes:
+        return IntentResult("answer", f"当前可直接标注：{'、'.join(genes)}。", planner="reference:capabilities")
+    return IntentResult(
+        "answer",
+        f"当前选择 {build}；坐标区域绘图可用，但项目未内置该版本的完整基因注释。"
+        f"请导入匹配 {build} 的 GTF/GFF 后，再使用基因名定位或标注。",
+        planner="reference:capabilities",
+    )
 
 
 def _region_overlaps(viewport: Dict[str, Any], chrom: str, start: int, end: int) -> bool:
@@ -2160,7 +3306,68 @@ def _region_overlaps(viewport: Dict[str, Any], chrom: str, start: int, end: int)
 
 def _confirmation_text(message: str) -> bool:
     compact = re.sub(r"\s+", "", message).lower()
-    return compact in {"确定", "确认", "可以", "好的", "好", "是", "是的", "ok", "yes", "继续", "执行", "a", "选择a", "选a"}
+    if compact in {
+        "确定", "确认", "确定一下", "确认一下", "我确认", "我确定", "可以", "好的", "好",
+        "是", "是的", "没问题", "开始吧", "就这样", "ok", "yes", "继续", "执行",
+        "a", "选择a", "选a",
+    }:
+        return True
+    return bool(re.fullmatch(r"(?:确定|确认)(?:一下|执行|生成|绘图|画图|开始)?", compact))
+
+
+def _cancellation_text(message: str) -> bool:
+    compact = re.sub(r"\s+", "", str(message or "")).lower()
+    if compact in {"取消", "不用", "不要", "否", "不", "放弃", "先不画", "不画", "取消生成", "取消执行", "no", "cancel"}:
+        return True
+    return bool(re.fullmatch(r"(?:取消|不要|不用)(?:生成|执行|画图)?", compact))
+
+
+def _blank_chat_spec(session_id: str) -> Dict[str, Any]:
+    """Return a valid, non-renderable FigureSpec for a fresh chat.
+
+    Keeping this as a FigureSpec (rather than using a separate UI-only state)
+    means the existing chat/history APIs can be used immediately.  The draft
+    marker is removed when a data-backed workflow is confirmed.
+    """
+    return {
+        "schema_version": "0.1",
+        "figure_type": "hic_triangle",
+        "figure_id": f"{session_id}_figure",
+        "title": "尚未载入图形",
+        "data_sources": [],
+        "viewport": {
+            "chrom": "chr1",
+            "start": 0,
+            "end": 2_000_000,
+            "coordinate_system": "0-based-half-open",
+        },
+        "analysis": {
+            "resolution": "auto",
+            "balance": True,
+            "normalization": "raw",
+            "shared_color_scale": True,
+        },
+        "panels": [{
+            "id": "draft_panel",
+            "kind": "hic_heatmap",
+            "label": "Hi-C",
+            "height_cm": "auto",
+            "layers": [],
+        }],
+        "layout": {
+            "width_cm": 12,
+            "gap_cm": 0.15,
+            "left_margin_cm": 1.5,
+            "right_margin_cm": 2,
+            "font_size": 5,
+        },
+        "export": {
+            "formats": ["svg", "png", "pdf"],
+            "dpi": 300,
+            "output_basename": f"{session_id}_figure",
+        },
+        "metadata": {"draft": True},
+    }
 
 
 def _single_hic_spec(
@@ -2173,6 +3380,7 @@ def _single_hic_spec(
     end: int,
     resolution: int,
     figure_type: str = "hic_triangle",
+    reference: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     labels = {
         "hic_triangle": "Hi-C triangle heatmap",
@@ -2217,6 +3425,7 @@ def _single_hic_spec(
         }],
         "layout": {"width_cm": 12, "gap_cm": 0.15, "left_margin_cm": 1.5, "right_margin_cm": 2},
         "export": {"formats": ["svg", "png", "pdf"], "dpi": 300, "output_basename": f"{session_id}_figure"},
+        "metadata": {"reference": reference or {"id": "hg38", "assembly": "GRCh38"}},
     }
 
 

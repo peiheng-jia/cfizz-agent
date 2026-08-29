@@ -53,6 +53,21 @@ class IntentInterpreterTests(unittest.TestCase):
         result = self.interpreter.interpret("图中文字调到 8 pt", self.spec)
         self.assertEqual(result.patch["operations"][0]["value"], 8.0)
 
+    def test_compact_font_request_uses_active_workflow_parameter_and_clamps(self):
+        spec = load_spec()
+        spec["figure_type"] = "compartment_diff_scatter"
+        spec["workflow_options"] = {"font_size": 6}
+
+        result = self.interpreter.interpret("字体换到2pt", spec)
+
+        operation = result.patch["operations"][0]
+        self.assertEqual(result.action, "patch")
+        self.assertEqual(operation["target_kind"], "figure")
+        self.assertEqual(operation["field"], "workflow_options.font_size")
+        self.assertEqual(operation["value"], 3.0)
+        self.assertIn("请求为 2 pt", result.reply)
+        self.assertIn("采用最近可用值 3 pt", result.reply)
+
     def test_infers_annotation_panel_for_overlapping_labels(self):
         result = self.interpreter.interpret("有的标签重叠了", self.spec)
         self.assertEqual(result.action, "patch")
@@ -99,6 +114,31 @@ class IntentInterpreterTests(unittest.TestCase):
         self.assertEqual(result.action, "patch")
         values = [operation["value"] for operation in result.patch["operations"]]
         self.assertEqual(values, ["PRGn", "#1B7837", "#762A83"])
+
+    def test_compartment_diff_scatter_can_replace_the_full_palette(self):
+        spec = load_spec()
+        spec["figure_type"] = "compartment_diff_scatter"
+        spec["workflow_options"] = {}
+
+        for message in ("颜色都换一下吧，现在这个色系不好看", "你推荐一套吧"):
+            result = self.interpreter.interpret(message, spec)
+            self.assertEqual(result.action, "patch")
+            operations = result.patch["operations"]
+            self.assertEqual(
+                [operation["field"] for operation in operations],
+                [
+                    "workflow_options.stable_a_color",
+                    "workflow_options.stable_b_color",
+                    "workflow_options.a_to_b_color",
+                    "workflow_options.b_to_a_color",
+                    "workflow_options.control_density_color",
+                    "workflow_options.treatment_density_color",
+                ],
+            )
+            self.assertEqual(
+                [operation["value"] for operation in operations],
+                ["#0072B2", "#009E73", "#E69F00", "#D55E00", "#56B4E9", "#CC79A7"],
+            )
 
 
 if __name__ == "__main__":

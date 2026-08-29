@@ -313,6 +313,7 @@ def plot_heatmap_with_loops(
     balance=False,
     dpi=1000,
     formats=None,
+    plot_size=4.0,
 ):
     """
     绘制带有loops标注的热图
@@ -380,7 +381,8 @@ def plot_heatmap_with_loops(
         start_pos=start,
         end_pos=end,
         chrom=chrom,
-        balance=balance
+        balance=balance,
+        plot_size=plot_size,
     )
     
     # 4. 获取热图轴对象

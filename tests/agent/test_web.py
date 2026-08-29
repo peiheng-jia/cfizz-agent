@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -38,7 +39,9 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.environment.stop()
 
     async def test_health_and_workspace_page(self):
-        self.assertEqual((await self.client.get("/api/health")).json()["status"], "ok")
+        health = (await self.client.get("/api/health")).json()
+        self.assertEqual(health["status"], "ok")
+        self.assertEqual(health["api_revision"], 12)
         planner = (await self.client.get("/api/planner")).json()
         self.assertIn(planner["mode"], {"rules", "ai-assisted"})
         catalog = (await self.client.get("/api/planners")).json()
@@ -62,18 +65,187 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="historyPanel"', response.text)
         self.assertIn('id="renderOverlay"', response.text)
         self.assertIn('id="languageSelect"', response.text)
+        self.assertIn('<details id="datasetSourceShelf"', response.text)
+        self.assertIn('id="datasetSourceList"', response.text)
+        self.assertIn('id="datasetSourceCount"', response.text)
+        self.assertIn('id="datasetAuthorizationBanner"', response.text)
+        self.assertIn('id="dismissDatasetAuthorization"', response.text)
+        self.assertIn('id="datasetRegionMode"', response.text)
+        self.assertIn('id="datasetRegionStatus"', response.text)
+        self.assertIn('id="referenceBuildStatus"', response.text)
+        self.assertIn('data-reference-build="hg38"', response.text)
+        self.assertIn('id="dataDialog"', response.text)
+        self.assertIn('id="confirmDataDialog"', response.text)
+        self.assertIn('data-i18n="addDataStep"', response.text)
+        self.assertIn('data-i18n="regionSettingsStep"', response.text)
+        self.assertIn('id="apiDialog"', response.text)
+        self.assertIn('id="figureTypeDialog"', response.text)
+        self.assertIn('id="openDataDialog"', response.text)
+        self.assertIn('id="openApiDialog"', response.text)
+        self.assertIn('id="openFigureTypeDialog"', response.text)
+        self.assertIn('id="figureTypeChoices"', response.text)
+        self.assertIn('class="figure-availability-legend"', response.text)
+        self.assertIn('class="figure-dialog-body"', response.text)
+        self.assertIn('class="figure-settings-section figure-control-dock"', response.text)
+        self.assertLess(response.text.index('id="figureTypeSelect"'), response.text.index('id="datasetResults"'))
+        self.assertIn('id="figureReadinessHint"', response.text)
+        self.assertIn('id="figureReadinessAction"', response.text)
+        self.assertIn('id="previewQuality"', response.text)
+        self.assertIn('id="figureZoomControl"', response.text)
+        self.assertIn('id="figureZoom"', response.text)
+        self.assertIn('id="fitFigure"', response.text)
         self.assertIn('id="svgDownload"', response.text)
         self.assertIn('id="pngDownload"', response.text)
         self.assertIn('id="pdfDownload"', response.text)
-        self.assertIn('data-i18n="combinedWorkflows"', response.text)
+        self.assertNotIn('data-i18n-placeholder="chatPlaceholder" disabled', response.text)
+        self.assertIn('data-i18n="inputDetails"', response.text)
+        self.assertIn('欢迎使用 CFIZZ Agent。请先导入数据或载入示例开始绘图', response.text)
+        self.assertNotIn('有的标签重叠了', response.text)
         stylesheet = await self.client.get("/assets/app.css")
         self.assertEqual(stylesheet.status_code, 200)
         self.assertIn(".workspace", stylesheet.text)
+        self.assertIn("backdrop-filter: none", stylesheet.text)
+        self.assertIn(".figure-dialog-body", stylesheet.text)
+        self.assertIn(".workflow-catalog.configuring > #workflowCatalog", stylesheet.text)
+        script = await self.client.get("/assets/app.js")
+        self.assertEqual(script.status_code, 200)
+        self.assertIn("function includedDatasetSources()", script.text)
+        self.assertIn("source_paths:", script.text)
+        self.assertIn("const preview = svg || png", script.text)
+        self.assertIn("function updateFigureReadinessHint", script.text)
+        self.assertIn("function projectedDatasetPathsForFigure", script.text)
+        self.assertIn("选择后将自动补齐已导入的匹配文件", script.text)
+        self.assertIn("function applyFigureZoom()", script.text)
+        self.assertIn("function previewDatasetRegion", script.text)
+        self.assertIn("function openDialog", script.text)
+        self.assertIn("function updateDatasetWorkspaceSummary", script.text)
+        self.assertNotIn("if (!options.refresh) closeDialog('dataDialog')", script.text)
+        self.assertIn("const managingData = Boolean($('dataDialog')?.open)", script.text)
+        self.assertIn("function syncFigureTypeTrigger", script.text)
+        self.assertIn("function renderFigureTypeChoices", script.text)
+        self.assertIn("function loadReferenceBuilds", script.text)
+        self.assertIn("function selectedReferenceAnnotationPath", script.text)
+        self.assertIn("function applyReferenceAnnotationChoice", script.text)
+        self.assertIn("option.dataset.availability", script.text)
+        self.assertIn("figure-choice-state", script.text)
+        self.assertIn("function closeWorkflowConfigurator", script.text)
+        self.assertNotIn("panel.scrollIntoView({behavior:'smooth'", script.text)
+        self.assertIn("preview_only:true", script.text)
+        self.assertIn("gene:datasetQuery()", script.text)
+        self.assertIn("localStorage.setItem('cfizz-figure-zoom'", script.text)
+        self.assertIn("document.createElement('details')", script.text)
+        self.assertIn("fileSection.open = true", script.text)
+        self.assertIn(".figure-choice-options button.is-ready", stylesheet.text)
+        self.assertIn(".figure-choice-options button.is-missing", stylesheet.text)
+        logo = await self.client.get("/assets/cfizz-brand-mark.png")
+        self.assertEqual(logo.status_code, 200)
+        self.assertEqual(logo.headers["content-type"], "image/png")
+        self.assertGreater(len(logo.content), 1000)
+
+    async def test_visualization_parameter_catalog_and_typed_session_updates(self):
+        response = await self.client.get(
+            "/api/visualization-parameters",
+            params={"figure_type": "compartment_diff_scatter"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        figure = response.json()["figure_types"][0]
+        self.assertEqual(figure["figure_type"], "compartment_diff_scatter")
+        parameters = {item["parameter"]: item for item in figure["parameters"]}
+        self.assertEqual(
+            parameters["workflow_options.stable_a_color"]["group"], "color",
+        )
+        self.assertEqual(
+            parameters["workflow_options.point_size"]["default_value"], 1,
+        )
+        self.assertEqual(
+            (await self.client.get(
+                "/api/visualization-parameters",
+                params={"figure_type": "not-a-figure"},
+            )).status_code,
+            404,
+        )
+
+        created = await self.client.post(
+            "/api/sessions",
+            json={"session_id": "parameter_api", "spec": load_spec()},
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        current = await self.client.get("/api/sessions/parameter_api/parameters")
+        self.assertEqual(current.status_code, 200, current.text)
+        gene_color = next(
+            item for item in current.json()["parameters"]
+            if item.get("target_id") == "genes_layer"
+            and item["parameter"] == "style.color"
+        )
+        self.assertIn("comparison", gene_color)
+        self.assertIn("default", gene_color["comparison"])
+
+        changed = await self.client.post(
+            "/api/sessions/parameter_api/parameters",
+            json={
+                "target_kind": "layer",
+                "target_id": "genes_layer",
+                "parameter": "style.color",
+                "value": "#0072B2",
+                "render": False,
+            },
+        )
+        self.assertEqual(changed.status_code, 200, changed.text)
+        changed_color = next(
+            item for item in changed.json()["parameters"]
+            if item.get("target_id") == "genes_layer"
+            and item["parameter"] == "style.color"
+        )
+        self.assertEqual(changed_color["current_value"], "#0072B2")
+        self.assertTrue(changed_color["is_modified"])
+
+        confirmation = await self.client.post(
+            "/api/sessions/parameter_api/parameters",
+            json={
+                "target_kind": "analysis",
+                "parameter": "resolution",
+                "value": 100_000,
+                "render": False,
+            },
+        )
+        self.assertEqual(confirmation.status_code, 409, confirmation.text)
+        self.assertTrue(confirmation.json()["detail"]["requires_confirmation"])
+        confirmed = await self.client.post(
+            "/api/sessions/parameter_api/parameters",
+            json={
+                "target_kind": "analysis",
+                "parameter": "resolution",
+                "value": 100_000,
+                "confirm_scientific_change": True,
+                "render": False,
+            },
+        )
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        self.assertEqual(confirmed.json()["spec"]["analysis"]["resolution"], 100_000)
+
+    async def test_blank_chat_session_accepts_first_message_without_rendering(self):
+        """A fresh page can chat before any figure or data source is loaded."""
+        blank = await self.client.post("/api/sessions/blank", json={"session_id": "blank_chat"})
+        self.assertEqual(blank.status_code, 200, blank.text)
+        payload = blank.json()
+        self.assertTrue(payload["spec"]["metadata"]["draft"])
+        self.assertEqual(payload["spec"]["data_sources"], [])
+
+        response = await self.client.post(
+            "/api/sessions/blank_chat/chat",
+            json={"message": "你好", "render": True},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIsNone(response.json()["job"])
 
     async def test_reference_and_dataset_scan_endpoints(self):
         references = await self.client.get("/api/references")
         self.assertEqual(references.status_code, 200)
         self.assertEqual(references.json()["references"][0]["id"], "hg38")
+        self.assertEqual(
+            [item["id"] for item in references.json()["references"]],
+            ["hg38"],
+        )
         response = await self.client.post("/api/datasets/scan", json={"path": "demo/data", "gene": "FOXJ1"})
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
@@ -108,6 +280,74 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["spec"]["figure_type"], "hic_triangle")
         self.assertGreaterEqual(len(payload["spec"]["panels"]), 2)
         self.assertIsNone(payload["job"])
+
+    async def test_dataset_region_preview_does_not_persist_a_session(self):
+        response = await self.client.post("/api/sessions/from-dataset", json={
+            "session_id": "viewport_preview_test",
+            "path": "demo/data",
+            "gene": "chr17:75Mb-76Mb",
+            "preview_only": True,
+            "render": False,
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["preview_only"])
+        self.assertIsNone(payload["job"])
+        self.assertEqual(payload["spec"]["viewport"]["chrom"], "chr17")
+        self.assertEqual(payload["spec"]["viewport"]["start"], 75_000_000)
+        self.assertEqual(payload["spec"]["viewport"]["end"], 76_000_000)
+        self.assertNotIn("viewport_preview_test", self.app.state.workspace.sessions)
+        self.assertFalse((Path(self.runtime.name) / "sessions" / "viewport_preview_test.json").exists())
+
+    async def test_manual_compartment_region_is_not_replaced_by_auto_window(self):
+        case_dir = PROJECT_ROOT / "demo" / "cases" / "2121401"
+        hic = case_dir / "1_2_pairs_result" / "51_5" / "51_5_1000.mcool"
+        e1 = case_dir / "1_3_hicviz_output" / "1_computation" / "compartment" / "1_1.51_5_1000.51_5_1000.100kb.E1.tsv"
+        response = await self.client.post("/api/sessions/from-dataset", json={
+            "session_id": "manual_compartment_preview",
+            "path": str(hic.parent),
+            "source_paths": [str(hic.parent), str(e1.parent)],
+            "selected_paths": [str(hic), str(e1)],
+            "figure_type": "compartment",
+            "gene": "chr1:1Mb-3Mb",
+            "preview_only": True,
+            "render": False,
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        viewport = response.json()["spec"]["viewport"]
+        self.assertEqual(viewport["chrom"], "chr1")
+        self.assertEqual(viewport["start"], 1_000_000)
+        self.assertEqual(viewport["end"], 3_000_000)
+        self.assertEqual(viewport["focus_label"].upper(), "CHR1:1MB-3MB")
+        self.assertNotIn("manual_compartment_preview", self.app.state.workspace.sessions)
+
+    async def test_create_session_combines_hic_and_track_from_separate_sources(self):
+        hic_root = Path(self.runtime.name) / "hic-source"
+        track_root = Path(self.runtime.name) / "track-source"
+        hic_root.mkdir()
+        track_root.mkdir()
+        hic_path = hic_root / "sample.mcool"
+        track_path = track_root / "sample.bw"
+        shutil.copy2(PROJECT_ROOT / "demo/data/hiPSC_nor_chr17.mcool", hic_path)
+        shutil.copy2(PROJECT_ROOT / "demo/data/hiPSC_nor_chr17_mean.bw", track_path)
+
+        response = await self.client.post("/api/sessions/from-dataset", json={
+            "session_id": "cross_source_session",
+            "path": str(hic_root),
+            "source_paths": [str(hic_root), str(track_root)],
+            "selected_paths": [str(hic_path), str(track_path)],
+            "figure_type": "hic_triangle",
+            "render": False,
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        selected_sources = {
+            (source["type"], str(Path(source["path"]).resolve()))
+            for source in payload["spec"]["data_sources"]
+        }
+        self.assertIn(("mcool", str(hic_path.resolve())), selected_sources)
+        self.assertIn(("bigwig", str(track_path.resolve())), selected_sources)
+        self.assertFalse(payload["dataset_scan"]["missing"])
 
     async def test_integrated_workflow_uses_registered_renderer(self):
         response = await self.client.post("/api/sessions/from-dataset", json={
@@ -199,6 +439,166 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hic_paths, {first, second})
         self.assertEqual(payload["spec"]["figure_type"], "hic_multi")
         self.assertIn("使用所选文件", payload["revision"]["summary"])
+
+    async def test_chat_previews_and_confirms_fixed_workflow_from_dataset_path(self):
+        """A chat request must use the same bounded CFIZZ workflow contract as the UI."""
+        data_dir = PROJECT_ROOT / "demo" / "cases" / "2121401" / "data"
+        first = await self.client.post("/api/sessions/from-hic", json={
+            "session_id": "chat_workflow_preview",
+            "hic_path": str((data_dir / "51_5_1000.mcool").resolve()),
+            "chrom": "chr1",
+            "render": False,
+        })
+        self.assertEqual(first.status_code, 200, first.text)
+
+        preview = await self.client.post(
+            "/api/sessions/chat_workflow_preview/chat",
+            json={
+                "message": f"数据路径是 {data_dir}，我要画双样本三角 Hi-C 对比图",
+                "render": False,
+            },
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        preview_payload = preview.json()
+        self.assertEqual(preview_payload["intent"]["action"], "clarify")
+        self.assertEqual(preview_payload["intent"]["planner"], "chat:workflow")
+        self.assertIn("51_5_1000.mcool", preview_payload["intent"]["reply"])
+        self.assertIn("51_6_1000.mcool", preview_payload["intent"]["reply"])
+        self.assertIn("请回复“确认”", preview_payload["intent"]["reply"])
+        self.assertEqual(preview_payload["version_id"], "v0001")
+
+        confirmed = await self.client.post(
+            "/api/sessions/chat_workflow_preview/chat",
+            json={"message": "确认", "render": False},
+        )
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        payload = confirmed.json()
+        self.assertEqual(payload["intent"]["action"], "workflow_apply")
+        self.assertEqual(payload["spec"]["figure_type"], "hic_triangle_multi")
+        self.assertEqual(payload["version_id"], "v0002")
+        hic_paths = {
+            str(Path(source["path"]).resolve())
+            for source in payload["spec"]["data_sources"]
+            if source["type"] in {"cool", "mcool"}
+        }
+        self.assertEqual(
+            hic_paths,
+            {
+                str((data_dir / "51_5_1000.mcool").resolve()),
+                str((data_dir / "51_6_1000.mcool").resolve()),
+            },
+        )
+
+    async def test_chat_workflow_reuses_path_from_previous_turn(self):
+        data_dir = PROJECT_ROOT / "demo" / "cases" / "2121401" / "data"
+        created = await self.client.post("/api/sessions/from-hic", json={
+            "session_id": "chat_workflow_history",
+            "hic_path": str((data_dir / "51_5_1000.mcool").resolve()),
+            "chrom": "chr1",
+            "render": False,
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+
+        path_turn = await self.client.post(
+            "/api/sessions/chat_workflow_history/chat",
+            json={"message": f"我的实验数据路径是 {data_dir}", "render": False},
+        )
+        self.assertEqual(path_turn.status_code, 200, path_turn.text)
+        follow_up = await self.client.post(
+            "/api/sessions/chat_workflow_history/chat",
+            json={"message": "然后画双样本三角 Hi-C 对比图", "render": False},
+        )
+        self.assertEqual(follow_up.status_code, 200, follow_up.text)
+        payload = follow_up.json()
+        self.assertEqual(payload["intent"]["planner"], "chat:workflow")
+        self.assertIn("51_5_1000.mcool", payload["intent"]["reply"])
+        self.assertIn("51_6_1000.mcool", payload["intent"]["reply"])
+
+    async def test_chat_direct_hic_path_auto_discovers_required_companion(self):
+        """A pasted HIC file should use the same CFIZZ companion resolver as the UI."""
+        data_dir = PROJECT_ROOT / "demo" / "cases" / "2121401" / "data"
+        created = await self.client.post("/api/sessions/from-hic", json={
+            "session_id": "chat_direct_hic",
+            "hic_path": str((data_dir / "51_5_1000.mcool").resolve()),
+            "chrom": "chr1",
+            "render": False,
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+
+        response = await self.client.post(
+            "/api/sessions/chat_direct_hic/chat",
+            json={
+                "message": f"用 {data_dir / '51_5_1000.mcool'} 画 TAD 绝缘图",
+                "render": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["intent"]["action"], "clarify")
+        self.assertEqual(payload["intent"]["planner"], "chat:workflow")
+        self.assertIn("51_5_1000.mcool", payload["intent"]["reply"])
+        self.assertIn("insulation.tsv", payload["intent"]["reply"])
+        self.assertIn("请回复“确认”", payload["intent"]["reply"])
+
+    async def test_chat_single_hic_for_two_sample_workflow_requests_missing_input(self):
+        """The conversation path must enforce the workflow's exact HIC count."""
+        data_dir = PROJECT_ROOT / "demo" / "cases" / "2121401" / "data"
+        created = await self.client.post("/api/sessions/from-hic", json={
+            "session_id": "chat_hic_count",
+            "hic_path": str((data_dir / "51_5_1000.mcool").resolve()),
+            "chrom": "chr1",
+            "render": False,
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+
+        response = await self.client.post(
+            "/api/sessions/chat_hic_count/chat",
+            json={
+                "message": f"用 {data_dir / '51_5_1000.mcool'} 画双样本三角 Hi-C 对比图",
+                "render": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["intent"]["action"], "clarify")
+        self.assertIn("至少需要 2 个 Hi-C 文件", payload["intent"]["reply"])
+        self.assertIn("明确给出文件路径", payload["intent"]["reply"])
+
+    async def test_ai_workflow_identification_returns_to_chat_confirmation(self):
+        class FakeWorkflowPlanner:
+            def status(self):
+                return {"mode": "ai-assisted", "provider": "fake", "model": "test"}
+
+            def interpret(self, message, spec, history=None):
+                return IntentResult(
+                    "workflow",
+                    "将执行双样本 Hi-C 对比。",
+                    {"workflow_request": {"figure_type": "hic_multi", "source_ids": [], "options": {}}},
+                    planner="fake:workflow",
+                )
+
+        self.app.state.workspace.planner_registry.planners["deepseek"] = FakeWorkflowPlanner()
+        data_dir = PROJECT_ROOT / "demo" / "cases" / "2121401" / "data"
+        created = await self.client.post("/api/sessions/from-hic", json={
+            "session_id": "ai_chat_workflow",
+            "hic_path": str((data_dir / "51_5_1000.mcool").resolve()),
+            "chrom": "chr1",
+            "render": False,
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+        response = await self.client.post(
+            "/api/sessions/ai_chat_workflow/chat",
+            json={
+                "message": f"请用 {data_dir} 生成双样本 Hi-C 图",
+                "provider": "deepseek",
+                "render": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["intent"]["action"], "clarify")
+        self.assertEqual(payload["intent"]["planner"], "chat:workflow")
+        self.assertIn("51_5_1000.mcool", payload["intent"]["reply"])
 
     async def test_chat_can_add_bigwigs_from_a_user_directory_to_current_hic(self):
         created = await self.client.post("/api/sessions", json={"session_id": "add_tracks", "spec": load_spec()})
@@ -389,6 +789,33 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         current = (await self.client.get("/api/sessions/test")).json()
         color = current["spec"]["panels"][2]["layers"][0]["style"]["color"]
         self.assertEqual(color, "#009E73")
+
+    async def test_chat_applies_recommended_compartment_diff_palette_without_ai(self):
+        spec = load_spec()
+        spec["figure_type"] = "compartment_diff_scatter"
+        spec["workflow_options"] = {}
+        created = await self.client.post(
+            "/api/sessions",
+            json={"session_id": "compartment_diff_palette", "spec": spec},
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+
+        response = await self.client.post(
+            "/api/sessions/compartment_diff_palette/chat",
+            json={"message": "你推荐一套吧", "render": False},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["intent"]["action"], "patch")
+        self.assertEqual(payload["version_id"], "v0002")
+        self.assertEqual(payload["spec"]["workflow_options"], {
+            "stable_a_color": "#0072B2",
+            "stable_b_color": "#009E73",
+            "a_to_b_color": "#E69F00",
+            "b_to_a_color": "#D55E00",
+            "control_density_color": "#56B4E9",
+            "treatment_density_color": "#CC79A7",
+        })
 
     async def test_restores_a_selected_history_version_and_renders_it(self):
         await self.client.post("/api/sessions", json={"session_id": "restore_history", "spec": load_spec()})
@@ -862,6 +1289,37 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["spec"]["viewport"]["chrom"], "chr17")
         self.assertEqual(payload["spec"]["analysis"]["resolution"], 10_000)
         self.assertEqual(payload["inspection"]["metadata"]["inspection_level"], "full")
+        self.assertEqual(payload["spec"]["metadata"]["reference"]["id"], "hg38")
+
+    async def test_coordinate_only_reference_is_preserved_and_never_falls_back_to_hg38(self):
+        response = await self.client.post("/api/sessions/from-hic", json={
+            "session_id": "from_hic_hg19",
+            "hic_path": "demo/data/hiPSC_nor_chr17.mcool",
+            "reference_build": "hg19",
+            "chrom": "chr17",
+            "start": 75_400_000,
+            "end": 76_340_000,
+            "render": False,
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        reference = payload["spec"]["metadata"]["reference"]
+        self.assertEqual((reference["id"], reference["assembly"]), ("hg19", "GRCh37"))
+        self.assertFalse(reference["complete"])
+
+        chat = await self.client.post(
+            "/api/sessions/from_hic_hg19/chat",
+            json={"message": "标注 MYC 基因", "render": False},
+        )
+        self.assertEqual(chat.status_code, 200, chat.text)
+        result = chat.json()
+        self.assertEqual(result["intent"]["action"], "clarify")
+        self.assertEqual(result["intent"]["planner"], "reference:hg19")
+        self.assertIn("匹配 hg19 的 GTF/GFF", result["intent"]["reply"])
+        self.assertFalse(any(
+            source.get("id") == "reference_genes_hg38"
+            for source in result["spec"]["data_sources"]
+        ))
 
     async def test_create_from_hic_accepts_ready_figure_type(self):
         response = await self.client.post("/api/sessions/from-hic", json={

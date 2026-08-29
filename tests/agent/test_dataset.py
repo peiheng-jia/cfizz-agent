@@ -28,6 +28,8 @@ class DatasetDiscoveryTests(unittest.TestCase):
     def test_reference_catalog_and_foxj1_lookup(self):
         catalog = self.references.catalog()
         self.assertEqual(catalog[0]["id"], "hg38")
+        self.assertEqual([item["id"] for item in catalog], ["hg38"])
+        self.assertTrue(catalog[0]["complete"])
         location = self.references.locate_gene("FOXJ1")
         self.assertEqual((location.chrom, location.start, location.end), ("chr17", 76136332, 76141245))
         self.assertEqual(location.source, "GTF")
@@ -35,6 +37,19 @@ class DatasetDiscoveryTests(unittest.TestCase):
         self.assertIsNotNone(other)
         self.assertEqual(other.chrom, "chr17")
         self.assertIn("ACOX1", catalog[0]["bundled_genes"])
+
+    def test_coordinate_only_reference_accepts_matching_user_annotation(self):
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as directory:
+            annotation = Path(directory) / "custom_hg19.gtf"
+            annotation.write_text(
+                'chr2\ttest\tgene\t101\t250\t.\t+\t.\tgene_id "CUSTOM1"; gene_name "CUSTOM1";\n',
+                encoding="utf-8",
+            )
+            location = self.references.locate_gene("CUSTOM1", "hg19", annotation)
+            self.assertIsNotNone(location)
+            self.assertEqual((location.assembly, location.chrom, location.start, location.end), ("hg19", "chr2", 100, 250))
+            self.assertFalse(self.references.has_complete_annotation("hg19"))
+            self.assertEqual(self.references.bundled_gene_names("hg19"), [])
 
     def test_scans_demo_as_experiment_directory(self):
         scan = scan_dataset("demo/data", self.inspector, self.references, gene="FOXJ1")

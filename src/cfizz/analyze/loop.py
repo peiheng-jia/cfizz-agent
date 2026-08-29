@@ -935,23 +935,43 @@ def load_plot_data_loops(output_path: Path) -> dict:
     return data_dict
 
 
-def plot_loops_stacked_bar(data_dict: dict, comparison: str, output_dir: Path) -> None:
+def plot_loops_stacked_bar(
+    data_dict: dict,
+    comparison: str,
+    output_dir: Path,
+    *,
+    stable_color: str = LOOP_COLORS['Stable'],
+    low_color: str = LOOP_COLORS['Low_FE'],
+    medium_color: str = LOOP_COLORS['Medium_FE'],
+    high_color: str = LOOP_COLORS['High_FE'],
+    width_cm: float = 6.4,
+    height_cm: float = 5,
+    font_size: float = 5,
+    bar_width: float = 0.8,
+    show_counts: bool = True,
+    dpi: int = 300,
+) -> None:
     """
     绘制Loops分类堆积柱状图。
     Source: a_6 (参考a_5的绘图逻辑)
     """
     print(f"\n生成 {comparison} 堆积柱状图...")
 
-    width_cm, height_cm = 6.4, 5
     fig, ax = plt.subplots(figsize=(width_cm / 2.54, height_cm / 2.54))
 
     samples = list(data_dict.keys())
     n_samples = len(samples)
     x_positions = np.arange(n_samples)
-    width = 0.8
+    width = bar_width
 
     categories = ['Stable', 'Low_FE', 'Medium_FE', 'High_FE']
     category_labels = ['stable (shared)', 'unique (low FE)', 'unique (medium FE)', 'unique (high FE)']
+    colors = {
+        'Stable': stable_color,
+        'Low_FE': low_color,
+        'Medium_FE': medium_color,
+        'High_FE': high_color,
+    }
 
     bottom = np.zeros(n_samples)
 
@@ -959,23 +979,25 @@ def plot_loops_stacked_bar(data_dict: dict, comparison: str, output_dir: Path) -
         pct_values = [data_dict[sample].get(f'{cat}_pct', 0) for sample in samples]
         count_values = [data_dict[sample].get(cat, 0) for sample in samples]
 
-        bars = ax.bar(x_positions, pct_values, width, bottom=bottom, label=category_labels[i], color=LOOP_COLORS[cat])
+        bars = ax.bar(x_positions, pct_values, width, bottom=bottom, label=category_labels[i], color=colors[cat])
 
         for j, (bar, pct_val, count_val) in enumerate(zip(bars, pct_values, count_values)):
-            if pct_val > 1:
+            if show_counts and pct_val > 1:
                 height = bar.get_height()
                 y_pos = bottom[j] + height / 2
                 ax.text(bar.get_x() + bar.get_width()/2, y_pos, f'{pct_val:.1f}%({int(count_val)})',
-                       ha='center', va='center', fontsize=5, color='black')
+                       ha='center', va='center', fontsize=font_size, color='black')
 
         bottom = [b + p for b, p in zip(bottom, pct_values)]
 
-    ax.set_xlabel('Sample')
-    ax.set_ylabel('Percentage (%)')
+    ax.set_xlabel('Sample', fontsize=font_size)
+    ax.set_ylabel('Percentage (%)', fontsize=font_size)
     ax.set_xticks(x_positions)
-    ax.set_xticklabels(samples)
+    ax.set_xticklabels(samples, fontsize=font_size)
+    ax.tick_params(axis='y', labelsize=font_size)
     ax.set_ylim(0, 100)
-    ax.legend(title='loop change', loc=(1.01, 0.6), frameon=False)
+    ax.legend(title='loop change', loc=(1.01, 0.6), frameon=False,
+              fontsize=font_size, title_fontsize=font_size)
     ax.grid(axis='y', alpha=0.3, linestyle='--')
     ax.set_axisbelow(True)
 
@@ -986,7 +1008,7 @@ def plot_loops_stacked_bar(data_dict: dict, comparison: str, output_dir: Path) -
     output_svg = output_dir / f"loops_{comparison_clean}_stacked_bar.svg"
     output_pdf = output_dir / f"loops_{comparison_clean}_stacked_bar.pdf"
 
-    plt.savefig(output_png, dpi=300, bbox_inches='tight')
+    plt.savefig(output_png, dpi=dpi, bbox_inches='tight')
     plt.savefig(output_svg, format='svg', bbox_inches='tight')
     plt.savefig(output_pdf, format='pdf', bbox_inches='tight')
     plt.close()
@@ -1000,7 +1022,17 @@ def analyze_single_comparison_loops(
     output_root: str,
     run_mode: str,
     control_loops_path: str = None,
-    treatment_loops_path: str = None
+    treatment_loops_path: str = None,
+    stable_color: str = LOOP_COLORS['Stable'],
+    low_color: str = LOOP_COLORS['Low_FE'],
+    medium_color: str = LOOP_COLORS['Medium_FE'],
+    high_color: str = LOOP_COLORS['High_FE'],
+    width_cm: float = 6.4,
+    height_cm: float = 5,
+    font_size: float = 5,
+    bar_width: float = 0.8,
+    show_counts: bool = True,
+    dpi: int = 300,
 ) -> None:
     """
     分析单个比较组的Loops差异（v8 升级 - 双向匹配）。
@@ -1200,7 +1232,14 @@ def analyze_single_comparison_loops(
                 return
 
             data_dict = load_plot_data_loops(comparison_dir)
-            plot_loops_stacked_bar(data_dict, comparison_clean, comparison_dir)
+            plot_loops_stacked_bar(
+                data_dict, comparison_clean, comparison_dir,
+                stable_color=stable_color, low_color=low_color,
+                medium_color=medium_color, high_color=high_color,
+                width_cm=width_cm, height_cm=height_cm,
+                font_size=font_size, bar_width=bar_width,
+                show_counts=show_counts, dpi=dpi,
+            )
 
         logger.info("\n" + "=" * 70)
         logger.info(f"分析完成！")

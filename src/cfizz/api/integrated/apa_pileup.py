@@ -143,7 +143,8 @@ def plot_apa_heatmap_visualization(
     vmax: float = None,
     cmap: str = 'Reds',
     dpi: int = 200,
-    balance: bool = False
+    balance: bool = False,
+    plot_size: float = 4.0,
 ) -> plt.Figure:
     """绘制APA热图
     
@@ -163,7 +164,7 @@ def plot_apa_heatmap_visualization(
         cmap = plt.colormaps[cmap]
     
     # 计算布局参数
-    layout = calculate_heatmap_layout(n_plots=1, plot_size=4.0)
+    layout = calculate_heatmap_layout(n_plots=1, plot_size=plot_size)
     
     # 创建图形
     fig = plt.figure(figsize=(layout['fig_width'], layout['fig_height']))
@@ -217,6 +218,7 @@ def plot_apa_heatmap(
     balance: bool = True,
     n_processes: int = None,
     formats=None,
+    plot_size: float = 4.0,
 ):
     """绘制APA热图
     
@@ -269,7 +271,8 @@ def plot_apa_heatmap(
         vmax=vmax,
         cmap=cmap,
         dpi=dpi,
-        balance=balance
+        balance=balance,
+        plot_size=plot_size,
     )
     
     # 5. 保存图片

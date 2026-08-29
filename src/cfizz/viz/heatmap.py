@@ -121,7 +121,8 @@ def plot_single_heatmap(
     start_pos=None, 
     end_pos=None, 
     chrom=None, 
-    balance=False
+    balance=False,
+    plot_size=4.0,
 ):
     """
     Plot a single Hi-C matrix heatmap.
@@ -150,7 +151,7 @@ def plot_single_heatmap(
         vmax=vmax,
         cmap=cmap,
         color_scale=color_scale,
-        plot_size=4.0,
+        plot_size=plot_size,
         start_pos=start_pos,
         end_pos=end_pos,
         chrom=chrom,
@@ -633,6 +634,7 @@ def plot_oe_heatmap(
     cmap: str = "RdBu_r",
     title: Optional[str] = None,
     chrom: Optional[str] = None,
+    plot_size: float = 4.0,
     save_path: Optional[str] = None,
     dpi: int = 300
 ) -> plt.Figure:
@@ -673,7 +675,7 @@ def plot_oe_heatmap(
     setup_plot_style()
     
     # Calculate layout
-    layout = calculate_heatmap_layout(n_plots=1, plot_size=4.0)
+    layout = calculate_heatmap_layout(n_plots=1, plot_size=plot_size)
     
     # Create figure
     fig = plt.figure(figsize=(layout['fig_width'], layout['fig_height']))

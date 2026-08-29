@@ -142,6 +142,7 @@ def plot_tad_heatmap_with_boundaries(
     vmin: float = 0,
     vmax: float = 1,
     cmap: str = "Reds",
+    color_scale: str = "linear",
     color_boundary: str = "#d62728",
     boundary_width: int = 2,
     figsize: Tuple[float, float] = (8, 8),
@@ -186,8 +187,9 @@ def plot_tad_heatmap_with_boundaries(
     fig, ax = plt.subplots(figsize=figsize)
     
     # Plot heatmap
-    im = ax.imshow(matrix, cmap=cmap, aspect='auto', 
-                   interpolation='none', vmin=vmin, vmax=vmax)
+    norm = LogNorm(vmin=max(float(vmin), np.finfo(float).tiny), vmax=vmax) if color_scale == "log" else Normalize(vmin=vmin, vmax=vmax)
+    im = ax.imshow(matrix, cmap=cmap, aspect='auto',
+                   interpolation='none', norm=norm)
     
     # Mark boundaries
     if chrom is not None and start is not None:
