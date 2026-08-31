@@ -1,0 +1,36 @@
+name: cfizz
+
+services:
+  agent:
+    build:
+      context: .
+    image: cfizz-agent:trial
+    restart: unless-stopped
+    init: true
+    ports:
+      # Trial deployments remain private and are reached through an SSH tunnel.
+      - "127.0.0.1:8000:8000"
+    environment:
+      MPLCONFIGDIR: /var/lib/cfizz/matplotlib
+    volumes:
+      - ./storage/runtime:/var/lib/cfizz
+      - ./storage/data:/data:ro
+      - ./storage/uploads:/uploads
+      - ./storage/demo:/app/demo:ro
+      - ./storage/references:/app/references:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5).read()
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
