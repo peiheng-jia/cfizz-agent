@@ -86,6 +86,7 @@ examples_output/
 agent_output/
 agent_sessions/
 agent_runtime/
+storage/
 *.png
 *.pdf
 *.jpg

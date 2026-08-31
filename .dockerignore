@@ -14,6 +14,7 @@ htmlcov
 agent_output
 agent_runtime
 agent_sessions
+storage
 demo
 references
 data
