@@ -42,5 +42,22 @@ From a trusted workstation, create a tunnel and open
 ssh -L 8000:127.0.0.1:8000 ubuntu@SERVER_IP
 ```
 
-Before opening CFIZZ to other users, add a TLS reverse proxy, authentication,
-per-user data isolation and request limits.
+## Password-protected public IP trial
+
+For a small shared trial without a domain, keep the application bound to
+`127.0.0.1:8000` and put Nginx in front of it. The included
+`nginx-ip.conf.template` provides TLS, HTTP Basic authentication, a 2 GiB
+upload limit and long timeouts for figure rendering. Replace
+`__CFIZZ_PUBLIC_IP__` and `__CFIZZ_HTTPS_PORT__` before installing it as an
+Nginx site.
+
+Public-IP certificates require Certbot 5.4 or newer and the ACME
+`shortlived` profile. Keep TCP port 80 reachable for standalone validation and
+renewal, while exposing the Nginx HTTPS port to users. The included systemd
+service and timer check renewal twice daily and reload Nginx after a successful
+renewal.
+
+Only the password hash belongs in `/etc/nginx/cfizz.htpasswd`; do not commit
+credentials, private keys, uploaded data or generated artifacts. This setup is
+for a trusted, small trial group: CFIZZ currently shares runtime data between
+authenticated users and does not provide per-user isolation.
