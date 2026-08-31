@@ -15,6 +15,16 @@ exposing the unauthenticated application directly to the public internet.
 The large directories are intentionally not part of the Git repository and
 must be copied or mounted on the server.
 
+On a Tencent Cloud host that cannot reach Docker Hub directly, the optional
+`docker-daemon.tencent.json` file configures Tencent Cloud's registry mirror.
+Install it as `/etc/docker/daemon.json` and restart Docker before building.
+The Python package index can likewise be overridden during a build:
+
+```bash
+docker compose build \
+  --build-arg PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
+```
+
 ## Start and verify
 
 ```bash

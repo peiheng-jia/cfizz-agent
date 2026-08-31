@@ -8,11 +8,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Keep the runtime image small while retaining a compiler fallback for
-# scientific packages that do not publish a wheel for a particular platform.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential curl \
-    && rm -rf /var/lib/apt/lists/*
+# The deployment can override this at build time when the public PyPI endpoint
+# is slow or unavailable, for example with a cloud-provider package mirror.
+ARG PIP_INDEX_URL=https://pypi.org/simple
 
 COPY pyproject.toml MANIFEST.in README.md LICENSE ./
 COPY src ./src
