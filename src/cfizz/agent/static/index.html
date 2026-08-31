@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CFIZZ Agent</title>
     <link rel="icon" type="image/png" href="/assets/cfizz-brand-mark.png?v=1">
-    <link rel="stylesheet" href="/assets/app.css?v=42">
+    <link rel="stylesheet" href="/assets/app.css?v=43">
 </head>
 <body>
   <main class="workspace">
@@ -79,7 +79,27 @@
                 </header>
                 <section class="settings-section source-section">
                   <div class="data-dialog-step"><span>01</span><strong data-i18n="addDataStep">添加数据源</strong></div>
-                  <div class="data-path-row"><input id="dataPath" placeholder="/data/sample.mcool 或 /data/case1" data-i18n-placeholder="dataPathPlaceholder"><button type="submit" data-i18n="load">导入数据源</button></div>
+                  <div class="local-data-import">
+                    <div class="local-data-import-copy">
+                      <strong data-i18n="localImportTitle">从本机上传</strong>
+                      <small data-i18n="localImportHint">选择一个或多个数据文件，也可以保留文件夹结构整体上传。</small>
+                    </div>
+                    <div class="local-data-import-actions">
+                      <button id="chooseLocalFiles" type="button" class="primary"><span data-i18n="chooseLocalFiles">选择文件</span><small data-i18n="chooseLocalFilesHint">可多选</small></button>
+                      <button id="chooseLocalFolder" type="button"><span data-i18n="chooseLocalFolder">选择文件夹</span><small data-i18n="chooseLocalFolderHint">保留目录结构</small></button>
+                    </div>
+                    <input id="localDatasetFiles" type="file" multiple hidden accept=".cool,.mcool,.bw,.bigwig,.gtf,.gff,.gff3,.bed,.bedpe,.tsv,.txt,.npy">
+                    <input id="localDatasetFolder" type="file" multiple webkitdirectory directory hidden>
+                    <div id="localUploadProgress" class="local-upload-progress" role="status" aria-live="polite" hidden>
+                      <div><strong id="localUploadTitle" data-i18n="uploadPreparing">正在准备上传……</strong><span id="localUploadPercent">0%</span></div>
+                      <progress id="localUploadBar" max="100" value="0">0%</progress>
+                      <small id="localUploadDetail"></small>
+                    </div>
+                  </div>
+                  <details class="server-data-import">
+                    <summary><span><strong data-i18n="serverImportTitle">使用服务器目录</strong><small data-i18n="serverImportHint">适合管理员或已经通过 SFTP 上传的数据。</small></span></summary>
+                    <div class="data-path-row"><input id="dataPath" placeholder="/data/sample.mcool 或 /data/case1" data-i18n-placeholder="dataPathPlaceholder"><button type="submit" data-i18n="load">导入数据源</button></div>
+                  </details>
                   <div class="data-dialog-step region-step"><span>02</span><strong data-i18n="regionSettingsStep">设置绘图范围</strong></div>
                   <div class="dataset-options">
                     <div class="dataset-region-control">
@@ -103,7 +123,7 @@
                       <button id="dismissDatasetAuthorization" type="button" data-i18n="authorizationDismiss">暂不处理</button>
                     </div>
                   </div>
-                  <small id="datasetHint" data-i18n="datasetHint">支持单个 .cool/.mcool 或实验目录；绘图区域可自动推荐，也可切换后手动指定。</small>
+                  <small id="datasetHint" data-i18n="datasetHint">本机文件会先上传到服务器并自动识别；也可以使用服务器上的现有目录。</small>
                   <details id="datasetSourceShelf" class="dataset-source-shelf" hidden open>
                     <summary class="dataset-source-shelf-header">
                       <span class="dataset-source-summary-row">
@@ -242,6 +262,6 @@
       </footer>
     </section>
   </main>
-    <script src="/assets/app.js?v=74"></script>
+    <script src="/assets/app.js?v=75"></script>
 </body>
 </html>

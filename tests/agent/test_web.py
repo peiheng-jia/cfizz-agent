@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.parse import quote
 
 import httpx
 
@@ -41,7 +42,7 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_health_and_workspace_page(self):
         health = (await self.client.get("/api/health")).json()
         self.assertEqual(health["status"], "ok")
-        self.assertEqual(health["api_revision"], 12)
+        self.assertEqual(health["api_revision"], 13)
         planner = (await self.client.get("/api/planner")).json()
         self.assertIn(planner["mode"], {"rules", "ai-assisted"})
         catalog = (await self.client.get("/api/planners")).json()
@@ -76,6 +77,13 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('data-reference-build="hg38"', response.text)
         self.assertIn('id="dataDialog"', response.text)
         self.assertIn('id="confirmDataDialog"', response.text)
+        self.assertIn('id="chooseLocalFiles"', response.text)
+        self.assertIn('id="chooseLocalFolder"', response.text)
+        self.assertIn('id="localDatasetFiles"', response.text)
+        self.assertIn('id="localDatasetFolder"', response.text)
+        self.assertIn('webkitdirectory', response.text)
+        self.assertIn('id="localUploadProgress"', response.text)
+        self.assertIn('class="server-data-import"', response.text)
         self.assertIn('data-i18n="addDataStep"', response.text)
         self.assertIn('data-i18n="regionSettingsStep"', response.text)
         self.assertIn('id="apiDialog"', response.text)
@@ -124,6 +132,9 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("function syncFigureTypeTrigger", script.text)
         self.assertIn("function renderFigureTypeChoices", script.text)
         self.assertIn("function loadReferenceBuilds", script.text)
+        self.assertIn("async function importLocalDataset", script.text)
+        self.assertIn("function uploadLocalChunk", script.text)
+        self.assertIn("LOCAL_UPLOAD_CHUNK_BYTES", script.text)
         self.assertIn("function selectedReferenceAnnotationPath", script.text)
         self.assertIn("function applyReferenceAnnotationChoice", script.text)
         self.assertIn("option.dataset.availability", script.text)
@@ -137,6 +148,8 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("fileSection.open = true", script.text)
         self.assertIn(".figure-choice-options button.is-ready", stylesheet.text)
         self.assertIn(".figure-choice-options button.is-missing", stylesheet.text)
+        self.assertIn(".local-data-import", stylesheet.text)
+        self.assertIn(".local-upload-progress", stylesheet.text)
         logo = await self.client.get("/assets/cfizz-brand-mark.png")
         self.assertEqual(logo.status_code, 200)
         self.assertEqual(logo.headers["content-type"], "image/png")
@@ -266,6 +279,70 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["filename"], "基因.gtf")
         self.assertEqual((directory / "基因.gtf").read_bytes(), b"##gff-version 3\n")
+
+    async def test_local_dataset_upload_preserves_folder_structure_and_completes(self):
+        session_id = "chat_upload_test"
+        upload_id = "batch_12345678"
+        content = b"##gff-version 3\nchr1\ttest\tgene\t1\t10\t.\t+\t.\tgene_id \"G1\";\n"
+        relative_path = "case-a/%E5%9F%BA%E5%9B%A0.gtf"
+        first = await self.client.post(
+            f"/api/datasets/uploads/{session_id}/{upload_id}/files",
+            content=content[:17],
+            headers={
+                "x-relative-path": relative_path,
+                "x-file-size": str(len(content)),
+                "x-chunk-offset": "0",
+            },
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertFalse(first.json()["complete"])
+        second = await self.client.post(
+            f"/api/datasets/uploads/{session_id}/{upload_id}/files",
+            content=content[17:],
+            headers={
+                "x-relative-path": relative_path,
+                "x-file-size": str(len(content)),
+                "x-chunk-offset": "17",
+            },
+        )
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertTrue(second.json()["complete"])
+
+        completed = await self.client.post(
+            f"/api/datasets/uploads/{session_id}/{upload_id}/complete"
+        )
+        self.assertEqual(completed.status_code, 200, completed.text)
+        payload = completed.json()
+        self.assertEqual(payload["file_count"], 1)
+        root = Path(payload["path"])
+        self.assertEqual(root, Path(self.runtime.name) / "uploads" / session_id / upload_id)
+        self.assertEqual((root / "case-a" / "基因.gtf").read_bytes(), content)
+        scanned = await self.client.post("/api/datasets/scan", json={"path": str(root)})
+        self.assertEqual(scanned.status_code, 200, scanned.text)
+        self.assertEqual(scanned.json()["files"][0]["name"], "基因.gtf")
+
+    async def test_local_dataset_upload_rejects_traversal_and_unsupported_files(self):
+        endpoint = "/api/datasets/uploads/chat_upload_test/batch_12345678/files"
+        traversal = await self.client.post(
+            endpoint,
+            content=b"x",
+            headers={
+                "x-relative-path": quote("../escape.gtf"),
+                "x-file-size": "1",
+                "x-chunk-offset": "0",
+            },
+        )
+        self.assertEqual(traversal.status_code, 422, traversal.text)
+        unsupported = await self.client.post(
+            endpoint,
+            content=b"x",
+            headers={
+                "x-relative-path": quote("malware.exe"),
+                "x-file-size": "1",
+                "x-chunk-offset": "0",
+            },
+        )
+        self.assertEqual(unsupported.status_code, 422, unsupported.text)
 
     async def test_create_session_from_dataset_builds_integrated_spec(self):
         response = await self.client.post("/api/sessions/from-dataset", json={

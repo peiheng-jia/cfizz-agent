@@ -1,4 +1,6 @@
-const EXPECTED_API_REVISION = 12;
+const EXPECTED_API_REVISION = 13;
+const LOCAL_UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024;
+const LOCAL_UPLOAD_SUFFIXES = new Set(['.cool','.mcool','.bw','.bigwig','.gtf','.gff','.gff3','.bed','.bedpe','.tsv','.txt','.npy']);
 const storedFigureZoom = Number.parseInt(localStorage.getItem('cfizz-figure-zoom') || '', 10);
 const state = { sessionId: null, session: null, chatSessionPromise: null, activeJob: null, provider: 'local', planners: [], figureTypes: [], referenceBuilds: [], datasetScan: null, datasetSources: [], activeDatasetKey: null, pendingDatasetPath: null, pendingDatasetOptions: null, datasetSourceRestoring: false, activeWorkflow: null, fileOverrides: {}, renderTimer: null, renderStartedAt: null, language: localStorage.getItem('cfizz-language') || 'zh-CN', regionEdited: false, figureZoom: Number.isFinite(storedFigureZoom) && storedFigureZoom >= 40 && storedFigureZoom <= 200 ? storedFigureZoom : 80 };
 const $ = (id) => document.getElementById(id);
@@ -165,7 +167,7 @@ function requireValidDatasetRegion() {
 const messages = {
   'zh-CN': {
     subtitle:'对话式 Hi-C 可视化', loadDemo:'载入 FOXJ1 示例', undo:'撤销', redo:'重做', chat:'对话', dataApi:'数据与 API',
-    addDataStep:'添加数据源', regionSettingsStep:'设置绘图范围',
+    addDataStep:'添加数据源', regionSettingsStep:'设置绘图范围', localImportTitle:'从本机上传', localImportHint:'选择一个或多个数据文件，也可以保留文件夹结构整体上传。', chooseLocalFiles:'选择文件', chooseLocalFilesHint:'可多选', chooseLocalFolder:'选择文件夹', chooseLocalFolderHint:'保留目录结构', serverImportTitle:'使用服务器目录', serverImportHint:'适合管理员或已经通过 SFTP 上传的数据。', uploadPreparing:'正在准备上传……', uploadScanning:'上传完成，正在识别数据……', localUploadComplete:(count)=>`已上传 ${count} 个文件并加入当前工作区。`, localUploadSelection:(count,size)=>`共 ${count} 个文件 · ${size}`, localUploadFile:(index,total,name)=>`第 ${index}/${total} 个：${name}`, localUploadSkipped:(count)=>`已跳过 ${count} 个不支持的文件。`,
     figureReady:'可生成', figureNeedsData:'需补数据', figureWaitingData:'待导入数据', figureUnavailable:'暂不可用', figureAutoSelect:'将自动匹配已导入文件', figureMissingDetail:(value)=>`缺少：${value}`,
     speciesHuman:'人类', speciesMouse:'小鼠', builtInReference:'内置', userReference:'用户注释', referenceComplete:(release,count)=>`${release}${count ? ` · ${Number(count).toLocaleString('zh-CN')} 个基因` : ''}`, referenceUserAnnotation:(name)=>`已选择 ${name} · 请确认坐标版本一致`, referenceCoordinatesOnly:'坐标绘图可用 · 使用基因名时需导入匹配版本的 GTF/GFF', referenceCatalogUnavailable:'暂时无法读取参考注释目录。',
     dialogueApi:'理解模式', connectAi:'API 配置', memoryOnly:'临时保存', apiKeyPlaceholder:'输入 API Key',
@@ -173,7 +175,7 @@ const messages = {
     show:'显示', hide:'隐藏', connectUse:'连接并使用', disconnect:'断开并清除', startHic:'单个 Hi-C 文件', dataSource:'数据源',
     load:'导入数据源', importedSources:'已导入数据源', sessionOnlySources:'勾选本次要合并使用的数据来源。', activeSource:'当前', switchSource:'切换', includedSource:'已加入', excludedSource:'未加入', refreshSource:'刷新', removeSource:'移除', sourceCount:(n)=>`${n} 个`, sourceSelectionCount:(selected,total)=>`${selected}/${total} 已加入`, sourceMeta:(hic, files)=>`${hic} 个 Hi-C · ${files} 个文件`, sourceSwitched:(name)=>`已切换到 ${name}`, sourceIncluded:(name,n)=>`已加入 ${name}，当前合并 ${n} 个数据源`, sourceExcluded:(name)=>`已暂停使用 ${name}`, sourceImported:(name)=>`已导入 ${name}`, sourceRefreshed:(name)=>`已刷新 ${name}`, sourceRemoved:(name)=>`已从当前页面移除 ${name}（磁盘文件未删除）`, noSourceSelected:'请在“导入 / 管理数据”中至少加入一个数据源。', combinedSourceSummary:(sources,hic,tracks,files)=>`已合并 ${sources} 个数据源 · ${hic} 个 Hi-C · ${tracks} 条轨道/注释 · 共 ${files} 个文件`, workspaceStatus:'当前工作区', dataWorkspaceEmpty:'尚未导入数据', dataWorkspaceEmptyHint:'导入 .cool/.mcool 文件或实验目录后开始绘图。', dataWorkspaceReady:(included,total)=>included === total ? `${included} 个数据源已就绪` : `${included}/${total} 个数据源已加入`, dataWorkspaceReadyHint:(hic,tracks,files)=>`${hic} 个 Hi-C · ${tracks} 条轨道/注释 · ${files} 个文件`, manageData:'导入 / 管理数据', dialogueSettings:'对话设置', dialogueSettingsTitle:'对话理解设置', dialogueSettingsHint:'选择理解模式，或连接 OpenAI / DeepSeek。', importDataTitle:'导入与管理数据', importDataHint:'添加来源、设置绘图区域，并管理本次使用的数据。', close:'关闭', done:'完成', figureType:'图类型', figureGenerate:'图形与生成', figureGenerateHint:'先选择要生成的图；下方文件用于微调输入。', figureGenerateCompactHint:'选择图形，确认输入后直接生成。', selectedFigure:'当前图形', selectFigureType:'选择图类型', figureSelection:'选择图形', figureSelectionHint:'先选择基础图形；复杂分析可从下方工作流进入。', directFigures:'基础图形', figureRequires:(value)=>`需要 ${value}`, inputDetails:'绘图输入与分辨率', inputDetailsHint:'需要时展开调整文件和共同分辨率。', advanced:'高级', applyCurrent:'应用到当前图', selectFigure:'选择图类型后生成', vectorPreview:'SVG 高清预览', rasterPreview:'PNG 预览', scanDataset:'实验目录', scanDirectory:'扫描目录', resolutionChoice:'共同分辨率', resolutionAuto:'自动选择',
     targetGene:'基因或范围（如 FOXJ1、chr1:1-2Mb）', drawingRegion:'绘图区域', regionAuto:'自动推荐', regionManual:'指定区域', referenceGenome:'参考注释', regionAutoPlaceholder:'由系统根据图类型与所选文件推荐', regionManualPlaceholder:'输入基因名或范围，如 MYC、chr1:25-45Mb', regionAutoWaiting:'导入数据并选择图类型后，将在这里显示预计范围。', regionManualWaiting:'导入数据后将验证并显示实际绘图范围。', regionEmpty:'请输入基因名或染色体范围。', regionInvalid:'区域格式不正确，请输入如 chr1:25-45Mb。', regionPreviewing:'正在计算预计绘图范围……', regionNeedsInputs:(missing)=>`补齐当前图所需输入后，将显示预计范围（缺少：${missing}）。`, requiredInput:'所需输入', regionManualExpected:(input,region)=>`已识别“${input}”，生成时将使用 ${region}。`, regionAutoExpected:(region,reason)=>`预计使用 ${region}${reason ? ` · ${reason}` : ' · 根据当前图类型与所选文件自动推荐。'}`, regionPreviewUnavailable:'暂时无法计算预计范围。', specifyRegion:'请指定绘图区域', humanHg38:'内置 · hg38 / GRCh38', authorizationTitle:'需要授权新目录', authorizationMessage:(path)=>`新数据源“${path}”尚未授权。已导入的数据会继续保留，授权后将自动扫描这个目录。`, authorizationFailed:(message)=>`授权未完成：${message}`, authorizationDismiss:'暂不处理', authorizeRetry:'授权并重新扫描', authorizing:'正在授权…', buildSelected:'生成图形', buildMultiomics:'生成默认整合图', confirmPairing:'我已确认以上样本对应关系', sampleName:'样本名', detectedRole:'数据角色',
-    loadingTypes:'正在读取图类型……', serverAuth:'', datasetHint:'支持 .cool/.mcool 文件或实验目录；重复路径会刷新，新的路径会保留并合并。', dataPathPlaceholder:'/data/sample.mcool 或 /data/case1', datasetPathPlaceholder:'E:\\project\\case1 或 /data/case1', combinedWorkflows:'', combinedWorkflowsHint:'', workflowCatalog:'更多 CFIZZ 工作流', useWorkflow:'选择文件', missingData:'补充数据', workflowNeeds:'需要', selectAll:'全选', clearAll:'清空', selectRecommended:'推荐选择', workflowInputs:'选择本次工作流使用的文件', buildWorkflow:'生成', addTracks:'添加轨道到当前图', addingTracks:'正在添加轨道', trackAlreadyPresent:'所选轨道已经在当前图中，无需重复添加。', tracksNotIncluded:'所选图形的 CFIZZ 接口没有整合轨道面板；本次只生成 Hi-C 图，已选轨道仍保留在会话中。', uploadSupplement:'上传补充文件', uploading:'正在上传补充文件……', uploadDone:'补充完成，正在重新扫描……', loadFigureFirst:'请先载入 Hi-C 文件或扫描实验目录。', workflowQueued:'已提交工作流请求；系统会复用当前数据，缺少输入时会提示。', workflowBuilding:'正在根据所选数据创建图形……', workflowCreated:'已根据所选数据创建图形，之后可以继续用对话修改。',
+    loadingTypes:'正在读取图类型……', serverAuth:'', datasetHint:'本机文件会先上传到服务器并自动识别；也可以使用服务器上的现有目录。', dataPathPlaceholder:'/data/sample.mcool 或 /data/case1', datasetPathPlaceholder:'E:\\project\\case1 或 /data/case1', combinedWorkflows:'', combinedWorkflowsHint:'', workflowCatalog:'更多 CFIZZ 工作流', useWorkflow:'选择文件', missingData:'补充数据', workflowNeeds:'需要', selectAll:'全选', clearAll:'清空', selectRecommended:'推荐选择', workflowInputs:'选择本次工作流使用的文件', buildWorkflow:'生成', addTracks:'添加轨道到当前图', addingTracks:'正在添加轨道', trackAlreadyPresent:'所选轨道已经在当前图中，无需重复添加。', tracksNotIncluded:'所选图形的 CFIZZ 接口没有整合轨道面板；本次只生成 Hi-C 图，已选轨道仍保留在会话中。', uploadSupplement:'上传补充文件', uploading:'正在上传补充文件……', uploadDone:'补充完成，正在重新扫描……', loadFigureFirst:'请先载入 Hi-C 文件或扫描实验目录。', workflowQueued:'已提交工作流请求；系统会复用当前数据，缺少输入时会提示。', workflowBuilding:'正在根据所选数据创建图形……', workflowCreated:'已根据所选数据创建图形，之后可以继续用对话修改。',
     welcomeMessage:'欢迎使用 CFIZZ Agent。请先导入数据或载入示例开始绘图；生成图形后，可在此调整区域、轨道与样式。',
     chatPlaceholder:'描述要生成的图，或说明需要调整的区域、轨道和样式……', sendDraw:'发送', enterHint:'Enter 发送 · Shift+Enter 换行', currentFigure:'CURRENT FIGURE', noFigure:'尚未载入图形',
     history:'历史版本', startConversation:'尚未生成图形', emptyHint:'导入数据或载入示例后，当前图和历史版本将在这里显示。', previewSize:'预览大小', fitWindow:'适应窗口',
@@ -183,7 +185,7 @@ const messages = {
   },
   en: {
     subtitle:'Conversational Hi-C visualization', loadDemo:'Load FOXJ1 demo', undo:'Undo', redo:'Redo', chat:'Chat', dataApi:'Data & API',
-    addDataStep:'Add a data source', regionSettingsStep:'Set the figure region',
+    addDataStep:'Add a data source', regionSettingsStep:'Set the figure region', localImportTitle:'Upload from this computer', localImportHint:'Choose one or more data files, or upload a folder while preserving its structure.', chooseLocalFiles:'Choose files', chooseLocalFilesHint:'Multiple allowed', chooseLocalFolder:'Choose folder', chooseLocalFolderHint:'Keep folder structure', serverImportTitle:'Use a server directory', serverImportHint:'For administrators or data already uploaded with SFTP.', uploadPreparing:'Preparing upload…', uploadScanning:'Upload complete; identifying data…', localUploadComplete:(count)=>`${count} file${count === 1 ? '' : 's'} uploaded and added to this workspace.`, localUploadSelection:(count,size)=>`${count} file${count === 1 ? '' : 's'} · ${size}`, localUploadFile:(index,total,name)=>`File ${index}/${total}: ${name}`, localUploadSkipped:(count)=>`${count} unsupported file${count === 1 ? '' : 's'} skipped.`,
     figureReady:'Ready', figureNeedsData:'Needs data', figureWaitingData:'Import data first', figureUnavailable:'Unavailable', figureAutoSelect:'Matching imported files will be selected', figureMissingDetail:(value)=>`Missing: ${value}`,
     speciesHuman:'Human', speciesMouse:'Mouse', builtInReference:'Built in', userReference:'User annotation', referenceComplete:(release,count)=>`${release}${count ? ` · ${Number(count).toLocaleString('en')} genes` : ''}`, referenceUserAnnotation:(name)=>`Selected ${name} · confirm that its assembly matches`, referenceCoordinatesOnly:'Coordinate plotting is available · gene-name lookup requires a matching GTF/GFF', referenceCatalogUnavailable:'Could not load the reference annotation catalog.',
     dialogueApi:'Interpretation mode', connectAi:'API settings', memoryOnly:'Temporary', apiKeyPlaceholder:'Enter API Key', show:'Show', hide:'Hide',
@@ -191,7 +193,7 @@ const messages = {
     connectUse:'Connect and use', disconnect:'Disconnect and clear', startHic:'Single Hi-C file', dataSource:'Data source', load:'Import source', importedSources:'Imported data sources', sessionOnlySources:'Select the sources to combine for this build.', activeSource:'Current', switchSource:'Switch', includedSource:'Included', excludedSource:'Not included', refreshSource:'Refresh', removeSource:'Remove', sourceCount:(n)=>`${n} source${n === 1 ? '' : 's'}`, sourceSelectionCount:(selected,total)=>`${selected}/${total} included`, sourceMeta:(hic, files)=>`${hic} Hi-C · ${files} file${files === 1 ? '' : 's'}`, sourceSwitched:(name)=>`Switched to ${name}`, sourceIncluded:(name,n)=>`Included ${name}; ${n} sources are now combined`, sourceExcluded:(name)=>`Paused ${name}`, sourceImported:(name)=>`Imported ${name}`, sourceRefreshed:(name)=>`Refreshed ${name}`, sourceRemoved:(name)=>`Removed ${name} from this page (files on disk were not deleted)`, noSourceSelected:'Include at least one source in Import / manage data.', combinedSourceSummary:(sources,hic,tracks,files)=>`Combined ${sources} source${sources === 1 ? '' : 's'} · ${hic} Hi-C · ${tracks} track/annotation file${tracks === 1 ? '' : 's'} · ${files} files total`, workspaceStatus:'Current workspace', dataWorkspaceEmpty:'No data imported', dataWorkspaceEmptyHint:'Import a .cool/.mcool file or experiment directory to begin.', dataWorkspaceReady:(included,total)=>included === total ? `${included} data source${included === 1 ? '' : 's'} ready` : `${included}/${total} sources included`, dataWorkspaceReadyHint:(hic,tracks,files)=>`${hic} Hi-C · ${tracks} track/annotation · ${files} files`, manageData:'Import / manage data', dialogueSettings:'Chat settings', dialogueSettingsTitle:'Chat interpretation', dialogueSettingsHint:'Choose an interpretation mode or connect OpenAI / DeepSeek.', importDataTitle:'Import and manage data', importDataHint:'Add sources, set the figure region, and manage inputs for this workspace.', close:'Close', done:'Done', figureType:'Figure type', figureGenerate:'Figure & build', figureGenerateHint:'Choose the figure first; use the files below to fine-tune its inputs.', figureGenerateCompactHint:'Choose a figure, confirm its inputs, and build.', selectedFigure:'Current figure', selectFigureType:'Choose a figure type', figureSelection:'Choose a figure', figureSelectionHint:'Choose a basic figure or open an advanced CFIZZ workflow below.', directFigures:'Basic figures', figureRequires:(value)=>`Requires ${value}`, inputDetails:'Figure inputs & resolution', inputDetailsHint:'Expand only when you need to adjust files or shared resolution.', advanced:'Advanced', applyCurrent:'Apply to current figure', vectorPreview:'Crisp SVG preview', rasterPreview:'PNG preview',
     scanDataset:'Experiment directory', scanDirectory:'Scan directory', resolutionChoice:'Shared resolution', resolutionAuto:'Automatic', targetGene:'Gene or region (e.g. FOXJ1 or chr1:1-2Mb)', drawingRegion:'Figure region', regionAuto:'Auto recommend', regionManual:'Specify region', referenceGenome:'Reference annotation', regionAutoPlaceholder:'Recommended from the figure type and selected files', regionManualPlaceholder:'Enter a gene or range, e.g. MYC or chr1:25-45Mb', regionAutoWaiting:'Import data and choose a figure to see the expected region.', regionManualWaiting:'The region will be validated after data is imported.', regionEmpty:'Enter a gene or genomic range.', regionInvalid:'Invalid range. Use a format such as chr1:25-45Mb.', regionPreviewing:'Calculating the expected figure region…', regionNeedsInputs:(missing)=>`The expected region will appear when the current figure has its required inputs (missing: ${missing}).`, requiredInput:'required input', regionManualExpected:(input,region)=>`“${input}” resolves to ${region}; this region will be used.`, regionAutoExpected:(region)=>`Expected region: ${region} · Recommended from the current figure and selected files.`, regionPreviewUnavailable:'The expected region is not available yet.', specifyRegion:'Specify figure region', humanHg38:'Built in · hg38 / GRCh38', selectFigure:'Choose a figure type, then build', confirmPairing:'I confirm these sample pairings', sampleName:'Sample name', detectedRole:'Data role',
     authorizationTitle:'New directory permission required', authorizationMessage:(path)=>`“${path}” is not authorized yet. Existing imports remain available; after permission is granted, this directory will be scanned automatically.`, authorizationFailed:(message)=>`Authorization did not complete: ${message}`, authorizationDismiss:'Not now', authorizeRetry:'Authorize and rescan', authorizing:'Authorizing…', buildSelected:'Build figure', buildMultiomics:'Build default integrated figure',
-    loadingTypes:'Loading figure types…', serverAuth:'', datasetHint:'Accepts .cool/.mcool files or experiment directories. Existing sources are preserved; importing the same path refreshes it.', dataPathPlaceholder:'/data/sample.mcool or /data/case1', datasetPathPlaceholder:'E:\\project\\case1 or /data/case1', combinedWorkflows:'', combinedWorkflowsHint:'', workflowCatalog:'More CFIZZ workflows', useWorkflow:'Choose files', missingData:'Add data', workflowNeeds:'Needs', selectAll:'Select all', clearAll:'Clear', selectRecommended:'Recommended', workflowInputs:'Choose files for this workflow', buildWorkflow:'Build', addTracks:'Add tracks to current figure', addingTracks:'Adding tracks', trackAlreadyPresent:'The selected tracks are already in the current figure; nothing to add.', tracksNotIncluded:'The selected CFIZZ renderer has no integrated track panel; this build will contain Hi-C only, while the checked tracks remain available in the session.', uploadSupplement:'Upload supporting files', uploading:'Uploading supporting files…', uploadDone:'Uploaded; rescanning…', loadFigureFirst:'Load a Hi-C file or scan a data directory.', workflowQueued:'Workflow request submitted; current inputs will be reused and missing data will be reported.', workflowBuilding:'Building a figure from the selected data…', workflowCreated:'Figure created from the selected data. You can continue editing it in chat.',
+    loadingTypes:'Loading figure types…', serverAuth:'', datasetHint:'Local files are uploaded to the server and identified automatically; existing server directories can also be used.', dataPathPlaceholder:'/data/sample.mcool or /data/case1', datasetPathPlaceholder:'E:\\project\\case1 or /data/case1', combinedWorkflows:'', combinedWorkflowsHint:'', workflowCatalog:'More CFIZZ workflows', useWorkflow:'Choose files', missingData:'Add data', workflowNeeds:'Needs', selectAll:'Select all', clearAll:'Clear', selectRecommended:'Recommended', workflowInputs:'Choose files for this workflow', buildWorkflow:'Build', addTracks:'Add tracks to current figure', addingTracks:'Adding tracks', trackAlreadyPresent:'The selected tracks are already in the current figure; nothing to add.', tracksNotIncluded:'The selected CFIZZ renderer has no integrated track panel; this build will contain Hi-C only, while the checked tracks remain available in the session.', uploadSupplement:'Upload supporting files', uploading:'Uploading supporting files…', uploadDone:'Uploaded; rescanning…', loadFigureFirst:'Load a Hi-C file or scan a data directory.', workflowQueued:'Workflow request submitted; current inputs will be reused and missing data will be reported.', workflowBuilding:'Building a figure from the selected data…', workflowCreated:'Figure created from the selected data. You can continue editing it in chat.',
     welcomeMessage:'Welcome to CFIZZ Agent. Import data or load the demo to begin; after a figure is created, use this chat to refine its region, tracks, and styling.',
     chatPlaceholder:'Describe a figure to create, or a region, track, or style to adjust…', sendDraw:'Send', enterHint:'Enter to send · Shift+Enter for a new line', currentFigure:'CURRENT FIGURE', noFigure:'No figure loaded',
     history:'History', startConversation:'No figure generated', emptyHint:'Import data or load the demo; the current figure and version history will appear here.', previewSize:'Preview size', fitWindow:'Fit window',
@@ -1174,6 +1176,108 @@ async function api(path, options={}) {
   }
   return data;
 }
+function formatUploadBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GiB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${bytes} B`;
+}
+function localUploadSuffix(name) {
+  const match = String(name || '').toLowerCase().match(/(\.[^.\/\\]+)$/);
+  return match ? match[1] : '';
+}
+function setLocalUploadProgress(title, detail='', loaded=0, total=0, failed=false) {
+  const panel = $('localUploadProgress');
+  const percent = total > 0 ? Math.min(100, Math.max(0, Math.round(loaded / total * 100))) : (loaded ? 100 : 0);
+  panel.hidden = false;
+  panel.classList.toggle('error', failed);
+  $('localUploadTitle').textContent = title;
+  $('localUploadDetail').textContent = detail;
+  $('localUploadPercent').textContent = `${percent}%`;
+  $('localUploadBar').value = percent;
+  $('localUploadBar').textContent = `${percent}%`;
+}
+function uploadLocalChunk(sessionId, uploadId, file, relativePath, start, end, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/datasets/uploads/${encodeURIComponent(sessionId)}/${encodeURIComponent(uploadId)}/files`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.setRequestHeader('x-relative-path', encodeURIComponent(relativePath));
+    xhr.setRequestHeader('x-file-size', String(file.size));
+    xhr.setRequestHeader('x-chunk-offset', String(start));
+    xhr.upload.addEventListener('progress', event => {
+      if (event.lengthComputable) onProgress(Math.min(end - start, event.loaded));
+    });
+    xhr.addEventListener('load', () => {
+      let payload = {};
+      try { payload = JSON.parse(xhr.responseText || '{}'); } catch (_) { /* handled below */ }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(payload);
+      else reject(new Error(payload.detail || `Upload failed (HTTP ${xhr.status})`));
+    });
+    xhr.addEventListener('error', () => reject(new Error(state.language === 'en' ? 'The upload connection was interrupted.' : '上传连接中断，请检查网络后重试。')));
+    xhr.addEventListener('abort', () => reject(new Error(state.language === 'en' ? 'Upload cancelled.' : '上传已取消。')));
+    xhr.send(file.slice(start, end));
+  });
+}
+async function importLocalDataset(fileList, selectionMode='files') {
+  const allFiles = [...(fileList || [])];
+  const entries = allFiles.map(file => ({
+    file,
+    relativePath: file.webkitRelativePath || file.name,
+  })).filter(entry => LOCAL_UPLOAD_SUFFIXES.has(localUploadSuffix(entry.file.name)));
+  const skipped = allFiles.length - entries.length;
+  if (!entries.length) {
+    setLocalUploadProgress(
+      state.language === 'en' ? 'No supported data files selected' : '没有可导入的数据文件',
+      state.language === 'en' ? 'Choose cool, mcool, BigWig, GTF/GFF, BED, BEDPE, TSV, TXT, or NPY files.' : '请选择 cool、mcool、BigWig、GTF/GFF、BED、BEDPE、TSV、TXT 或 NPY 文件。',
+      0, 0, true,
+    );
+    return;
+  }
+  const totalBytes = entries.reduce((sum, entry) => sum + entry.file.size, 0);
+  const sourceLabel = selectionMode === 'folder'
+    ? (entries[0].relativePath.split('/')[0] || entries[0].file.name)
+    : entries.length === 1
+      ? entries[0].file.name
+      : (state.language === 'en' ? `Local files · ${entries.length}` : `本机文件 · ${entries.length} 个`);
+  const uploadId = `local_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  const controls = [$('chooseLocalFiles'), $('chooseLocalFolder')];
+  controls.forEach(button => { button.disabled = true; });
+  setLocalUploadProgress(
+    t('uploadPreparing'),
+    `${t('localUploadSelection', entries.length, formatUploadBytes(totalBytes))}${skipped ? ` · ${t('localUploadSkipped', skipped)}` : ''}`,
+    0, totalBytes,
+  );
+  try {
+    await ensureChatSession();
+    let completedBytes = 0;
+    for (let index = 0; index < entries.length; index += 1) {
+      const {file, relativePath} = entries[index];
+      let offset = 0;
+      do {
+        const end = Math.min(file.size, offset + LOCAL_UPLOAD_CHUNK_BYTES);
+        const title = t('localUploadFile', index + 1, entries.length, file.name);
+        const detail = `${formatUploadBytes(completedBytes + offset)} / ${formatUploadBytes(totalBytes)}${skipped ? ` · ${t('localUploadSkipped', skipped)}` : ''}`;
+        setLocalUploadProgress(title, detail, completedBytes + offset, totalBytes);
+        await uploadLocalChunk(state.sessionId, uploadId, file, relativePath, offset, end, chunkLoaded => {
+          setLocalUploadProgress(title, detail, completedBytes + offset + chunkLoaded, totalBytes);
+        });
+        offset = end;
+      } while (offset < file.size);
+      completedBytes += file.size;
+    }
+    setLocalUploadProgress(t('uploadScanning'), t('localUploadSelection', entries.length, formatUploadBytes(totalBytes)), totalBytes || 1, totalBytes || 1);
+    const completed = await api(`/api/datasets/uploads/${encodeURIComponent(state.sessionId)}/${encodeURIComponent(uploadId)}/complete`, {method:'POST'});
+    await scanDatasetPath(completed.path, {sourceLabel});
+    setLocalUploadProgress(t('localUploadComplete', completed.file_count), skipped ? t('localUploadSkipped', skipped) : sourceLabel, totalBytes || 1, totalBytes || 1);
+  } catch (error) {
+    setLocalUploadProgress(state.language === 'en' ? 'Upload failed' : '本机数据上传失败', error.message, 0, totalBytes, true);
+    setStatus(state.language === 'en' ? 'Upload failed' : '上传失败', 'failed');
+  } finally {
+    controls.forEach(button => { button.disabled = false; });
+  }
+}
 async function ensureChatSession() {
   if (state.sessionId) return state.session;
   if (!state.chatSessionPromise) {
@@ -1318,8 +1422,20 @@ async function watchJob(job) {
 $('chatTab').addEventListener('click', () => switchSidebar('chat'));
 $('settingsTab').addEventListener('click', () => switchSidebar('settings'));
 $('openDataDialog').addEventListener('click', () => {
-  openDialog('dataDialog', 'dataPath');
+  openDialog('dataDialog', 'chooseLocalFiles');
   updateDatasetRegionControl();
+});
+$('chooseLocalFiles').addEventListener('click', () => $('localDatasetFiles').click());
+$('chooseLocalFolder').addEventListener('click', () => $('localDatasetFolder').click());
+$('localDatasetFiles').addEventListener('change', async event => {
+  const input = event.currentTarget;
+  await importLocalDataset(input.files, 'files');
+  input.value = '';
+});
+$('localDatasetFolder').addEventListener('change', async event => {
+  const input = event.currentTarget;
+  await importLocalDataset(input.files, 'folder');
+  input.value = '';
 });
 $('openApiDialog').addEventListener('click', () => openDialog('apiDialog', 'plannerSelect'));
 $('openFigureTypeDialog').addEventListener('click', () => {
@@ -1687,6 +1803,7 @@ function includedDatasetSources() {
   return state.datasetSources.filter(source => source.included !== false);
 }
 function datasetSourceLabel(source) {
+  if (source?.label) return source.label;
   const compact = String(source?.path || '').replace(/[\\/]+$/, '');
   return compact.split(/[\\/]/).pop() || compact || (state.language === 'en' ? 'Data source' : '数据源');
 }
@@ -2246,6 +2363,7 @@ async function scanDatasetPath(path, options={}) {
     Object.assign(source, {
       key:canonicalKey,
       path,
+      label:options.sourceLabel || saved?.label || null,
       gene,
       geneInput,
       regionEdited:Boolean(regionEdited),

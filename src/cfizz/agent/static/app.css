@@ -824,6 +824,54 @@ h1 { color: var(--ink); font-size: 16px; letter-spacing: -.025em; }
 .data-dialog-step > span { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; color: var(--danger); background: #fff0f1; font-size: 9px; font-weight: 850; }
 .data-dialog-step > strong { font-size: 11px; font-weight: 850; }
 .data-dialog-step.region-step { margin-top: 16px; padding-top: 14px; border-top: 1px solid #eee4de; }
+.local-data-import {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px 16px;
+  padding: 13px 14px;
+  border: 1px solid #ecd5d7;
+  border-radius: 10px;
+  background: #fffafa;
+}
+.local-data-import-copy { display: grid; min-width: 0; gap: 3px; }
+.local-data-import-copy strong { color: var(--ink); font-size: 12px; font-weight: 850; }
+.local-data-import-copy small { color: var(--muted); font-size: 9.5px; line-height: 1.45; }
+.local-data-import-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.local-data-import-actions button {
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  min-width: 112px;
+  min-height: 48px;
+  padding: 7px 11px;
+  text-align: left;
+}
+.local-data-import-actions button > span { font-size: 11px; font-weight: 800; }
+.local-data-import-actions button > small { margin-top: 1px; color: inherit; font-size: 8.5px; font-weight: 600; opacity: .72; }
+.local-upload-progress { grid-column: 1 / -1; display: grid; gap: 6px; padding-top: 10px; border-top: 1px solid #ecdfe0; }
+.local-upload-progress[hidden] { display: none !important; }
+.local-upload-progress > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.local-upload-progress strong { min-width: 0; overflow: hidden; color: var(--ink); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.local-upload-progress span { flex: 0 0 auto; color: var(--green-dark); font-size: 10px; font-weight: 850; }
+.local-upload-progress progress { width: 100%; height: 7px; overflow: hidden; border: 0; border-radius: 999px; accent-color: var(--green); }
+.local-upload-progress progress::-webkit-progress-bar { background: #eee7e4; border-radius: 999px; }
+.local-upload-progress progress::-webkit-progress-value { background: linear-gradient(90deg, var(--green), var(--brand-amber)); border-radius: 999px; }
+.local-upload-progress progress::-moz-progress-bar { background: linear-gradient(90deg, var(--green), var(--brand-amber)); border-radius: 999px; }
+.local-upload-progress > small { color: var(--muted); font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
+.local-upload-progress.error strong,
+.local-upload-progress.error span,
+.local-upload-progress.error > small { color: var(--danger); }
+.local-upload-progress.error progress { accent-color: var(--danger); }
+.server-data-import { margin-top: 9px; border-bottom: 1px solid #eee4de; }
+.server-data-import > summary { display: flex; padding: 9px 2px; color: var(--ink-soft); cursor: pointer; list-style: none; }
+.server-data-import > summary::-webkit-details-marker { display: none; }
+.server-data-import > summary::before { content: "›"; margin: 1px 7px 0 1px; color: var(--danger); font-size: 13px; font-weight: 850; transition: transform .15s ease; }
+.server-data-import[open] > summary::before { transform: rotate(90deg); }
+.server-data-import > summary > span { display: grid; gap: 1px; }
+.server-data-import > summary strong { font-size: 10.5px; font-weight: 800; }
+.server-data-import > summary small { color: var(--muted); font-size: 9px; line-height: 1.4; }
+.server-data-import .data-path-row { margin: 2px 0 11px; }
 .settings-dialog .data-path-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .settings-dialog .data-path-row input,
 .settings-dialog .data-path-row button { min-height: 40px; }
@@ -834,6 +882,12 @@ h1 { color: var(--ink); font-size: 16px; letter-spacing: -.025em; }
 .settings-dialog .dataset-source-list { max-height: none; overflow: visible; }
 .settings-dialog .dataset-authorization-banner { margin-top: 12px; }
 .data-dialog-footer { background: #fff; }
+
+@media (max-width: 640px) {
+  .local-data-import { grid-template-columns: 1fr; }
+  .local-data-import-actions { width: 100%; }
+  .local-data-import-actions button { min-width: 0; }
+}
 
 .figure-control-dock {
   position: static;

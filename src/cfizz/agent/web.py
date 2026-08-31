@@ -8,8 +8,9 @@ from dataclasses import replace
 import json
 import inspect
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
+import shutil
 import threading
 import uuid
 from typing import Any, Dict, Literal, Optional
@@ -59,6 +60,14 @@ from .parameters import (
 )
 from .references import ReferenceRegistry, normalize_chromosome
 from .session import FigureSession, FileFigureSessionStore
+
+
+DATASET_UPLOAD_SUFFIXES = {
+    ".cool", ".mcool", ".bw", ".bigwig", ".gtf", ".gff", ".gff3",
+    ".bed", ".bedpe", ".tsv", ".txt", ".npy",
+}
+MAX_UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_UPLOAD_FILE_BYTES = 50 * 1024 * 1024 * 1024
 
 
 class CreateSessionBody(BaseModel):
@@ -162,12 +171,23 @@ class WorkspaceService:
         self.runtime_root = runtime_root.resolve()
         self.session_root = self.runtime_root / "sessions"
         self.artifact_root = self.runtime_root / "artifacts"
+        self.upload_root = Path(
+            os.environ.get("CFIZZ_AGENT_UPLOAD_ROOT", self.runtime_root / "uploads")
+        ).expanduser().resolve()
+        self.upload_root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.max_upload_file_bytes = int(
+                os.environ.get("CFIZZ_AGENT_MAX_UPLOAD_FILE_BYTES", DEFAULT_MAX_UPLOAD_FILE_BYTES)
+            )
+        except ValueError:
+            self.max_upload_file_bytes = DEFAULT_MAX_UPLOAD_FILE_BYTES
+        self.max_upload_file_bytes = max(MAX_UPLOAD_CHUNK_BYTES, self.max_upload_file_bytes)
         self.store = FileFigureSessionStore(str(self.session_root))
         configured_roots = os.environ.get("CFIZZ_AGENT_DATA_ROOTS")
         # Region-sized reference tracks are generated inside the private runtime
         # directory.  Treat that directory as an internal trusted data root so
         # the normal FigureSpec path validator can render them.
-        data_roots = [str(self.project_root), str(self.runtime_root)]
+        data_roots = [str(self.project_root), str(self.runtime_root), str(self.upload_root)]
         if configured_roots:
             data_roots.extend(item for item in configured_roots.split(os.pathsep) if item)
         self.inspector = DataInspector(data_roots)
@@ -316,7 +336,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "service": "cfizz-agent", "api_revision": 12}
+        return {"status": "ok", "service": "cfizz-agent", "api_revision": 13}
 
     @app.get("/api/planner")
     async def planner_status():
@@ -403,10 +423,9 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         # header; decode once, then strip any path components defensively.
         filename = Path(unquote(request.headers.get("x-filename", ""))).name.strip()
         target_raw = unquote(request.headers.get("x-target-path", "")).strip()
-        allowed_suffixes = {".cool", ".mcool", ".bw", ".bigwig", ".gtf", ".gff", ".gff3", ".bed", ".bedpe", ".tsv", ".txt", ".npy"}
         if not filename or filename in {".", ".."}:
             raise HTTPException(422, "上传文件名不能为空。")
-        if Path(filename).suffix.lower() not in allowed_suffixes:
+        if Path(filename).suffix.lower() not in DATASET_UPLOAD_SUFFIXES:
             raise HTTPException(422, "暂不支持该文件类型；请上传 cool、mcool、BigWig、GTF、BED、BEDPE、TSV、TXT 或 NPY。")
         if not target_raw:
             raise HTTPException(422, "请先扫描数据目录，再上传补充文件。")
@@ -448,6 +467,129 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
             temporary.unlink(missing_ok=True)
             raise HTTPException(422, f"保存上传文件失败：{exc}") from exc
         return {"path": str(destination), "filename": filename, "size_bytes": written, "message": "补充文件已上传，可重新扫描目录。"}
+
+    @app.post("/api/datasets/uploads/{session_id}/{upload_id}/files")
+    async def upload_local_dataset_chunk(session_id: str, upload_id: str, request: Request):
+        """Receive one resumable browser-upload chunk inside a private batch.
+
+        The browser sends files sequentially in small raw-body requests.  A
+        server-controlled session/batch root preserves folder structure while
+        preventing absolute paths, traversal, unsupported file types, and
+        writes outside the configured upload directory.
+        """
+        relative_raw = unquote(request.headers.get("x-relative-path", "")).strip()
+        try:
+            batch_root, destination = _local_upload_destination(
+                service, session_id, upload_id, relative_raw
+            )
+            file_size = _upload_header_integer(request, "x-file-size", minimum=0)
+            offset = _upload_header_integer(request, "x-chunk-offset", minimum=0)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if file_size > service.max_upload_file_bytes:
+            limit_gib = service.max_upload_file_bytes / (1024 ** 3)
+            raise HTTPException(413, f"单个上传文件不能超过 {limit_gib:g} GiB。")
+        if offset > file_size:
+            raise HTTPException(422, "上传分块偏移超过文件大小。")
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                announced_chunk_size = int(content_length)
+            except ValueError as exc:
+                raise HTTPException(422, "上传分块大小无效。") from exc
+            if announced_chunk_size > MAX_UPLOAD_CHUNK_BYTES:
+                raise HTTPException(413, "单个上传分块不能超过 64 MiB。")
+            if offset + announced_chunk_size > file_size:
+                raise HTTPException(422, "上传分块超出声明的文件大小。")
+
+        batch_root.mkdir(parents=True, exist_ok=True)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            destination.parent.resolve().relative_to(batch_root.resolve())
+        except ValueError as exc:
+            raise HTTPException(422, "上传路径超出当前批次目录。") from exc
+
+        partial = destination.with_name(f".{destination.name}.cfizz-upload-part")
+        if destination.exists():
+            if destination.is_file() and destination.stat().st_size == file_size:
+                return {
+                    "path": str(destination), "relative_path": relative_raw,
+                    "received_bytes": file_size, "size_bytes": file_size,
+                    "complete": True,
+                }
+            raise HTTPException(409, "同名文件已经存在且大小不同，请重新选择文件。")
+
+        existing_size = partial.stat().st_size if partial.exists() else 0
+        if existing_size < offset:
+            raise HTTPException(409, f"上传分块不连续；服务器已有 {existing_size} 字节，请从该位置继续。")
+        free_bytes = shutil.disk_usage(service.upload_root).free
+        reserve_bytes = 256 * 1024 * 1024
+        required_bytes = file_size - offset
+        if free_bytes < required_bytes + reserve_bytes:
+            raise HTTPException(507, "服务器磁盘空间不足，无法继续上传。")
+
+        written = 0
+        try:
+            mode = "r+b" if partial.exists() else "w+b"
+            with partial.open(mode) as handle:
+                handle.seek(offset)
+                handle.truncate(offset)
+                async for chunk in request.stream():
+                    written += len(chunk)
+                    if written > MAX_UPLOAD_CHUNK_BYTES:
+                        raise HTTPException(413, "单个上传分块不能超过 64 MiB。")
+                    if offset + written > file_size:
+                        raise HTTPException(422, "上传数据超过声明的文件大小。")
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except HTTPException:
+            if partial.exists():
+                with partial.open("r+b") as handle:
+                    handle.truncate(offset)
+            raise
+        except OSError as exc:
+            if partial.exists():
+                with partial.open("r+b") as handle:
+                    handle.truncate(offset)
+            raise HTTPException(422, f"保存上传分块失败：{exc}") from exc
+
+        received = offset + written
+        complete = received == file_size
+        if complete:
+            os.replace(partial, destination)
+        return {
+            "path": str(destination), "relative_path": relative_raw,
+            "received_bytes": received, "size_bytes": file_size,
+            "complete": complete,
+        }
+
+    @app.post("/api/datasets/uploads/{session_id}/{upload_id}/complete")
+    async def complete_local_dataset_upload(session_id: str, upload_id: str):
+        try:
+            batch_root = _local_upload_batch_root(service, session_id, upload_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if not batch_root.exists() or not batch_root.is_dir():
+            raise HTTPException(404, "找不到本次上传。")
+        if any(path.is_file() for path in batch_root.rglob("*.cfizz-upload-part")):
+            raise HTTPException(409, "仍有文件尚未上传完成。")
+        files = [
+            path for path in batch_root.rglob("*")
+            if path.is_file() and path.suffix.lower() in DATASET_UPLOAD_SUFFIXES
+        ]
+        if not files:
+            raise HTTPException(422, "没有收到可识别的数据文件。")
+        try:
+            service.inspector.authorize_root(str(batch_root))
+        except (OSError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {
+            "path": str(batch_root),
+            "file_count": len(files),
+            "size_bytes": sum(path.stat().st_size for path in files),
+            "message": "本机文件已上传，正在扫描数据类型。",
+        }
 
     @app.post("/api/sessions/from-dataset")
     async def create_from_dataset(body: DatasetSessionBody):
@@ -1309,6 +1451,63 @@ def _session_or_404(service: WorkspaceService, session_id: str) -> FigureSession
         return service.get(session_id)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+def _upload_header_integer(request: Request, name: str, minimum: int = 0) -> int:
+    raw = request.headers.get(name)
+    if raw is None:
+        raise ValueError(f"缺少上传请求头 {name}。")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"上传请求头 {name} 必须是整数。") from exc
+    if value < minimum:
+        raise ValueError(f"上传请求头 {name} 不能小于 {minimum}。")
+    return value
+
+
+def _local_upload_batch_root(service: WorkspaceService, session_id: str, upload_id: str) -> Path:
+    if len(session_id) > 120:
+        raise ValueError("上传会话标识过长。")
+    safe_session_id = FigureSession._validate_id(session_id)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{7,79}", upload_id):
+        raise ValueError("上传批次标识无效。")
+    root = (service.upload_root / safe_session_id / upload_id).resolve()
+    try:
+        root.relative_to(service.upload_root)
+    except ValueError as exc:
+        raise ValueError("上传批次目录无效。") from exc
+    return root
+
+
+def _local_upload_destination(
+    service: WorkspaceService,
+    session_id: str,
+    upload_id: str,
+    relative_raw: str,
+) -> tuple[Path, Path]:
+    batch_root = _local_upload_batch_root(service, session_id, upload_id)
+    normalized = relative_raw.replace("\\", "/").strip("/")
+    if not normalized or len(normalized) > 1024:
+        raise ValueError("上传文件的相对路径为空或过长。")
+    relative = PurePosixPath(normalized)
+    parts = relative.parts
+    if (
+        relative.is_absolute()
+        or not parts
+        or len(parts) > 32
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(len(part) > 255 or any(ord(char) < 32 for char in part) for part in parts)
+    ):
+        raise ValueError("上传文件路径无效。")
+    if Path(parts[-1]).suffix.lower() not in DATASET_UPLOAD_SUFFIXES:
+        raise ValueError("暂不支持该文件类型；请选择 cool、mcool、BigWig、GTF、GFF、BED、BEDPE、TSV、TXT 或 NPY 文件。")
+    destination = batch_root.joinpath(*parts).resolve()
+    try:
+        destination.relative_to(batch_root)
+    except ValueError as exc:
+        raise ValueError("上传文件路径超出当前批次目录。") from exc
+    return batch_root, destination
 
 
 def _method_accepts_history(method: Any) -> bool:

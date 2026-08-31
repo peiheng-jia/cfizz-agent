@@ -12,6 +12,7 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       MPLCONFIGDIR: /var/lib/cfizz/matplotlib
+      CFIZZ_AGENT_UPLOAD_ROOT: /uploads
     volumes:
       - ./storage/runtime:/var/lib/cfizz
       - ./storage/data:/data:ro
