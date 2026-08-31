@@ -22,7 +22,9 @@ The Python package index can likewise be overridden during a build:
 
 ```bash
 docker compose build \
-  --build-arg PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
+  --build-arg PIP_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple \
+  --build-arg DEBIAN_MIRROR=https://mirrors.cloud.tencent.com/debian \
+  --build-arg DEBIAN_SECURITY_MIRROR=https://mirrors.cloud.tencent.com/debian-security
 ```
 
 ## Start and verify
