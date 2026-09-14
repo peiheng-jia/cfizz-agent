@@ -15,10 +15,11 @@ services:
       CFIZZ_AGENT_UPLOAD_ROOT: /uploads
     volumes:
       - ./storage/runtime:/var/lib/cfizz
-      - ./storage/data:/data:ro
+      # Point CFIZZ_DATA_DIR at a large host directory to avoid browser upload.
+      - ${CFIZZ_DATA_DIR:-./storage/data}:/data:ro
       - ./storage/uploads:/uploads
-      - ./storage/demo:/app/demo:ro
-      - ./storage/references:/app/references:ro
+      # Optional override; the image already contains one complete hg38 build.
+      - ${CFIZZ_REFERENCE_DIR:-./storage/references}:/app/references:ro
     healthcheck:
       test:
         - CMD

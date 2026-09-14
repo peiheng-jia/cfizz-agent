@@ -205,7 +205,7 @@ set -euo pipefail:任一步失败立即停
 | pairix | bioconda | pairs 文件索引(可选) |
 | cooler | bioconda | Step 2.1-2.3 |
 | ucsc-fetchchromsizes | bioconda | 染色体大小文件下载(可选) |
-| Python ≥ 3.9 | - | Step 3 stats.py |
+| Python ≥ 3.10 | - | Step 3 stats.py |
 
 > cfizz 主仓库的 `environment.yml` 已经覆盖前 7 项,激活环境即可。
 > 已有 `.mcool` 文件的可以完全跳过本目录,依赖 `environment.yml` 的 B 类(cfizz 本体)即可。

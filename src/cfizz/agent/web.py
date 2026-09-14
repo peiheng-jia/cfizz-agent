@@ -20,7 +20,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field, SecretStr
 
+from cfizz import __version__
+
 from .adapter import CfizzRenderAdapter
+from .bundled import DEMO_DATA_ROOT, RESOURCE_ROOT, load_demo_spec
 from .companions import (
     companion_resolution,
     discover_companion,
@@ -187,7 +190,13 @@ class WorkspaceService:
         # Region-sized reference tracks are generated inside the private runtime
         # directory.  Treat that directory as an internal trusted data root so
         # the normal FigureSpec path validator can render them.
-        data_roots = [str(self.project_root), str(self.runtime_root), str(self.upload_root)]
+        data_roots = [
+            str(self.project_root),
+            str(self.runtime_root),
+            str(self.upload_root),
+            str(DEMO_DATA_ROOT),
+            str(RESOURCE_ROOT),
+        ]
         if configured_roots:
             data_roots.extend(item for item in configured_roots.split(os.pathsep) if item)
         self.inspector = DataInspector(data_roots)
@@ -303,7 +312,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         yield
         service.jobs.shutdown(wait=False)
 
-    app = FastAPI(title="CFIZZ Agent", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="CFIZZ Agent", version=__version__, lifespan=lifespan)
     app.state.workspace = service
     @app.get("/", include_in_schema=False)
     async def index():
@@ -804,9 +813,10 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
 
     @app.post("/api/sessions/demo")
     async def create_demo(body: DemoSessionBody):
-        spec_path = root / "docs/examples/figure-spec.integrated-demo.json"
-        with spec_path.open("r", encoding="utf-8") as handle:
-            spec = json.load(handle)
+        try:
+            spec = load_demo_spec()
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(500, f"内置 FOXJ1 示例不完整：{exc}") from exc
         session = service.create(body.session_id, spec, replace=True)
         job = service.submit_render(session)
         return {**service.session_payload(session), "job": job.to_dict()}

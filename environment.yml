@@ -1,9 +1,8 @@
-# cfizz conda environment
-# 一键创建:
+# CFIZZ 完整分析环境（含 Agent 与 fastq 预处理工具）
+# 在仓库根目录一键创建:
 #   micromamba env create -f environment.yml
 #   micromamba activate cfizz
-#   pip install hicpeaks
-#   pip install -e .
+#   cfizz-agent --check
 
 name: cfizz
 channels:
@@ -13,29 +12,30 @@ channels:
 
 dependencies:
   # === 基础运行时 ===
-  - python=3.12
+  # Python 3.11 是当前 Docker、CI 和本地安装共同验证的版本。
+  - python=3.11
   - pip
 
   # === 数值 / 数据栈 ===
-  - numpy>=1.23
-  - pandas>=1.5
-  - scipy>=1.10
-  - cytoolz>=0.12
+  - numpy>=1.26,<2
+  - pandas>=2,<3
+  - scipy>=1.10,<2
+  - cytoolz>=0.12,<2
 
   # === 绘图栈 ===
-  - matplotlib>=3.5
-  - seaborn>=0.11
+  - matplotlib-base>=3.8,<4
+  - seaborn-base>=0.13,<0.14
 
   # === Hi-C 核心:矩阵 I/O + 算法 ===
-  - cooler>=0.3
-  - cooltools>=0.5
-  - bioframe>=0.6
+  - cooler>=0.10,<0.11
+  - cooltools>=0.7,<0.8
+  - bioframe>=0.7,<0.9
 
   # === BigWig 读写(7_x 整合图 + 4_1 demo 必需) ===
   - pybigwig>=0.3
 
   # === 辅助(统计 + 性能) ===
-  - scikit-image>=0.20
+  - scikit-image>=0.22,<0.27
   - scikit-learn>=1.0
   - statsmodels>=0.13
   - patsy>=0.5          # statsmodels 依赖
@@ -58,6 +58,8 @@ dependencies:
   - fastp>=1.0           # fastq 质控 + adapter 修剪
   - bwa-mem2>=2.2        # fastq → sam 比对(Hi-C 第一步)
 
-  # === pip 补充区(走 pip 而非 conda)===
-  # hicpeaks(含 pyHICCUPS CLI,conda 装不到):
-  #   pip install hicpeaks
+  # === pip 补充区（同时安装当前 GitHub checkout）===
+  - pip:
+      - -e .[agent]
+      - hicpeaks>=0.3.0
+      - adjustText>=1.0

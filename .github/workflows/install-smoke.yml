@@ -1,0 +1,52 @@
+name: Install smoke test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheel-install-and-render:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install source-build prerequisite
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Install wheel in a clean environment
+        run: |
+          smoke_env="${RUNNER_TEMP}/cfizz-wheel-${{ matrix.python-version }}"
+          python -m venv "${smoke_env}"
+          wheel_path="$(find dist -maxdepth 1 -name 'cfizz-*.whl' -print -quit)"
+          "${smoke_env}/bin/python" -m pip install --upgrade pip
+          "${smoke_env}/bin/python" -m pip install "${wheel_path}[agent]"
+          cd "$(mktemp -d)"
+          "${smoke_env}/bin/cfizz-agent" --version
+          "${smoke_env}/bin/cfizz-agent" --check
+          PATH="${smoke_env}/bin:${PATH}" "${smoke_env}/bin/python" "${GITHUB_WORKSPACE}/scripts/install_smoke.py"
+
+      - name: Unit-test bundled resources
+        run: |
+          PYTHONPATH=src python -m unittest tests.agent.test_bundled

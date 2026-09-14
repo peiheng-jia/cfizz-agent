@@ -1,11 +1,12 @@
 # Human GRCh38 gene annotation
 
-This directory is an optional, project-wide human gene annotation for the
-CFIZZ Agent. It is intentionally excluded from the GitHub source package
-because the compressed GTF and Tabix files are large. Keep a local copy here,
-or point a checkout at an equivalent reference directory, when full gene-name
-lookup and gene tracks are required. Experimental datasets should reference
-this shared copy instead of carrying a duplicate GTF in every case directory.
+This top-level directory is an optional local override for the CFIZZ Agent.
+Version 0.2.0 and later already ship a complete Ensembl 110 / GRCh38.p14
+annotation under `src/cfizz/agent/resources/references/hg38/`, so a fresh
+GitHub or wheel installation supports full gene-name lookup immediately.
+Place a compatible replacement here only when a deployment needs a different
+annotation release. Experimental datasets should use one shared reference
+instead of carrying a duplicate GTF in every case directory.
 
 Local annotation file:
 
@@ -28,8 +29,7 @@ python examples/agent/build_reference_index.py \
   --output-dir references/hg38
 ```
 
-The annotation file is large reference data and is intentionally not treated
-as source code. Keep its release and assembly metadata with any deployment.
-The published package still includes a FOXJ1 coordinate fallback for the demo;
-all other gene symbols require a user-provided GTF/GFF or this optional
-reference directory.
+The packaged reference contains the coordinate-sorted BGZF GTF, its Tabix
+index and the matching compact gene index. The unsorted source GTF is not
+duplicated in the package. Keep release and assembly metadata with any custom
+replacement.

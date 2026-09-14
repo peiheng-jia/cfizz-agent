@@ -17,6 +17,8 @@ import tempfile
 import threading
 from typing import Any, Dict, Iterable, Optional
 
+from .bundled import DEMO_DATA_ROOT, bundled_reference_root
+
 
 @dataclass(frozen=True)
 class GeneLocation:
@@ -133,7 +135,7 @@ class ReferenceRegistry:
         if build != "hg38":
             return []
         names = set(_BUILTIN_GENES.get(build, {}))
-        for directory in (self.project_root / "demo" / "data", self.project_root / "data"):
+        for directory in self._annotation_directories():
             if not directory.is_dir():
                 continue
             names.update(path.stem.upper() for path in directory.glob("*.gtf") if path.is_file())
@@ -348,9 +350,12 @@ class ReferenceRegistry:
     def _complete_annotation(self, build: str = "hg38") -> Optional[Path]:
         if build != "hg38":
             return None
-        path = self.project_root / "references" / "hg38" / "Homo_sapiens.GRCh38.110.add_chr.sorted.gtf.gz"
-        tabix = Path(str(path) + ".tbi")
-        return path if path.is_file() and tabix.is_file() else None
+        for directory in self._reference_directories(build):
+            path = directory / "Homo_sapiens.GRCh38.110.add_chr.sorted.gtf.gz"
+            tabix = Path(str(path) + ".tbi")
+            if path.is_file() and tabix.is_file():
+                return path
+        return None
 
     def _load_gene_index(self, build: str = "hg38") -> Optional[Dict[str, Any]]:
         if build != "hg38":
@@ -358,8 +363,15 @@ class ReferenceRegistry:
         with self._index_lock:
             if build in self._gene_indexes:
                 return self._gene_indexes[build]
-            path = self.project_root / "references" / "hg38" / "gene_index.json.gz"
-            if not path.is_file():
+            path = next(
+                (
+                    directory / "gene_index.json.gz"
+                    for directory in self._reference_directories(build)
+                    if (directory / "gene_index.json.gz").is_file()
+                ),
+                None,
+            )
+            if path is None:
                 return None
             try:
                 with gzip.open(path, "rt", encoding="utf-8") as handle:
@@ -373,22 +385,34 @@ class ReferenceRegistry:
         if build != "hg38":
             return None
         gene = gene.upper()
-        paths = (
-            self.project_root / "demo" / "data" / f"{gene}.gtf",
-            self.project_root / "data" / f"{gene}.gtf",
-        )
+        paths = tuple(directory / f"{gene}.gtf" for directory in self._annotation_directories())
         exact = next((path for path in paths if path.is_file()), None)
         if exact:
             return exact
         # Permit lower-case filenames and GFF/GFF3 companions without making
         # gene lookup depend on a particular naming convention.
-        for directory in (self.project_root / "demo" / "data", self.project_root / "data"):
+        for directory in self._annotation_directories():
             if not directory.is_dir():
                 continue
             for path in sorted(directory.glob("*"), key=lambda item: item.name.lower()):
                 if path.is_file() and path.suffix.lower() in {".gtf", ".gff", ".gff3"} and path.stem.upper() == gene:
                     return path
         return None
+
+    def _annotation_directories(self) -> tuple[Path, ...]:
+        """Prefer checkout/user overrides, then fall back to package fixtures."""
+        return (
+            self.project_root / "demo" / "data",
+            self.project_root / "data",
+            DEMO_DATA_ROOT,
+        )
+
+    def _reference_directories(self, build: str) -> tuple[Path, ...]:
+        """Prefer a mounted reference while keeping fresh installs functional."""
+        return (
+            self.project_root / "references" / build,
+            bundled_reference_root(build),
+        )
 
     @staticmethod
     def _parse_gene(path: Path, gene: str, build: str) -> Optional[GeneLocation]:

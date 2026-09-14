@@ -18,6 +18,10 @@ storage
 demo
 references
 data
+# The top-level directories above are deployment mounts. The small immutable
+# package fixtures with the same names must remain in the Docker build context.
+!src/cfizz/agent/resources/
+!src/cfizz/agent/resources/**
 tests
 scratch
 logs

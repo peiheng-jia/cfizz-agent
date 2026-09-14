@@ -8,12 +8,13 @@ exposing the unauthenticated application directly to the public internet.
 
 - `storage/runtime`: sessions, render artifacts and caches
 - `storage/uploads`: files uploaded through the application
-- `storage/data`: administrator-provided experiment data (read-only)
-- `storage/demo`: bundled small demo inputs (read-only)
-- `storage/references`: installed reference annotations (read-only)
+- `storage/data`: administrator-provided experiment data (read-only), or set
+  `CFIZZ_DATA_DIR=/absolute/host/path`
+- `storage/references`: optional annotation override (read-only)
 
-The large directories are intentionally not part of the Git repository and
-must be copied or mounted on the server.
+The image already contains the small FOXJ1 demo and one complete hg38 /
+Ensembl 110 annotation. Only user experiment data and optional reference
+overrides need to be copied or mounted on the server.
 
 On a Tencent Cloud host that cannot reach Docker Hub directly, the optional
 `docker-daemon.tencent.json` file configures Tencent Cloud's registry mirror.
@@ -30,7 +31,7 @@ docker compose build \
 ## Start and verify
 
 ```bash
-docker compose up -d --build
+CFIZZ_DATA_DIR=/path/to/server/data docker compose up -d --build
 docker compose ps
 curl --fail http://127.0.0.1:8000/api/health
 ```

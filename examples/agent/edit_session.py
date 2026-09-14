@@ -12,6 +12,7 @@ from cfizz.agent import (
     FigureSpecValidator,
     FileFigureSessionStore,
 )
+from cfizz.agent.bundled import DEMO_DATA_ROOT, load_demo_spec
 
 
 def load_json(path: str):
@@ -30,9 +31,11 @@ def main() -> int:
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[2]
-    inspector = DataInspector([str(project_root)])
+    inspector = DataInspector([str(project_root), str(DEMO_DATA_ROOT)])
     validator = FigureSpecValidator(inspector)
-    session = FigureSession(args.session_id, load_json(args.spec), validator=validator)
+    spec_path = Path(args.spec).expanduser().resolve()
+    spec = load_demo_spec() if spec_path.name == "figure-spec.integrated-demo.json" else load_json(args.spec)
+    session = FigureSession(args.session_id, spec, validator=validator)
     revision = session.apply_patch(load_json(args.patch))
     session_file = FileFigureSessionStore(args.session_dir).save(session)
 

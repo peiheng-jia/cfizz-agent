@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from cfizz.agent import CfizzRenderAdapter, DataInspector, FigureSpecValidator
+from cfizz.agent.bundled import DEMO_DATA_ROOT, load_demo_spec
 
 
 def main() -> int:
@@ -17,10 +18,13 @@ def main() -> int:
 
     project_root = Path(__file__).resolve().parents[2]
     spec_path = Path(args.spec).expanduser().resolve()
-    with spec_path.open("r", encoding="utf-8") as handle:
-        spec = json.load(handle)
+    if spec_path.name == "figure-spec.integrated-demo.json":
+        spec = load_demo_spec()
+    else:
+        with spec_path.open("r", encoding="utf-8") as handle:
+            spec = json.load(handle)
 
-    inspector = DataInspector(allowed_roots=[str(project_root), str(spec_path.parent)])
+    inspector = DataInspector(allowed_roots=[str(project_root), str(spec_path.parent), str(DEMO_DATA_ROOT)])
     validator = FigureSpecValidator(inspector)
     adapter = CfizzRenderAdapter(validator, args.output_dir)
 

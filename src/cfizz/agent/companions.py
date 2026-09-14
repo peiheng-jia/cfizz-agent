@@ -212,7 +212,8 @@ def suggest_feature_viewport(
 
     path = Path(feature_path)
     try:
-        first = path.open("r", encoding="utf-8", errors="replace").readline().strip().lower().split("\t")
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            first = handle.readline().strip().lower().split("\t")
         has_header = any(token in {"chrom", "chr", "chrom1"} for token in first)
         frame = pd.read_csv(path, sep="\t", header=0 if has_header else None, comment="#")
     except (OSError, ValueError, pd.errors.ParserError):
@@ -297,7 +298,8 @@ def _table_with_header(path: str | Path):
 
     table_path = Path(path)
     try:
-        first = table_path.open("r", encoding="utf-8", errors="replace").readline().strip()
+        with table_path.open("r", encoding="utf-8", errors="replace") as handle:
+            first = handle.readline().strip()
         tokens = [token.strip().casefold() for token in first.split("\t")]
         header_tokens = {
             "chrom", "chr", "chrom1", "start", "start1", "end", "end1",

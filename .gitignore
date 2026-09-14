@@ -109,8 +109,9 @@ data/**
 !data/
 !data/README.md
 
-# Large project-wide reference annotations (documented by references/**/README.md).
-# The release contains metadata only; install or mount the annotation separately.
+# Optional top-level reference overrides (documented by references/**/README.md).
+# The one packaged hg38 reference lives under src/cfizz/agent/resources/ and is
+# intentionally tracked; local replacements in this root directory stay ignored.
 references/hg38/**
 !references/hg38/
 !references/hg38/README.md

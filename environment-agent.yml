@@ -1,0 +1,29 @@
+# CFIZZ Agent 推荐环境（已有 cool/mcool、BigWig 等分析结果时使用）
+# 在仓库根目录运行:
+#   micromamba env create -f environment-agent.yml
+#   micromamba activate cfizz-agent
+#   cfizz-agent --check
+
+name: cfizz-agent
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+
+dependencies:
+  - python=3.11
+  - pip>=24
+  - numpy>=1.26,<2
+  - pandas>=2,<3
+  - scipy>=1.10,<2
+  - matplotlib-base>=3.8,<4
+  - seaborn-base>=0.13,<0.14
+  - cooler>=0.10,<0.11
+  - cooltools>=0.7,<0.8
+  - bioframe>=0.7,<0.9
+  - scikit-image>=0.22,<0.27
+  - cytoolz>=0.12,<2
+  - pybigwig>=0.3
+  - pysam>=0.22
+  - pip:
+      - -e .[agent]

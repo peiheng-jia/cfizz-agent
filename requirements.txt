@@ -1,10 +1,10 @@
-# cfizz pip 补充依赖
+# cfizz 完整分析流水线的可选 pip 补充依赖
 # 用法(在 micromamba 激活 cfizz 环境后):
 #   pip install -r requirements.txt
 #   pip install -e .
 #
-# 这个文件是 conda(environment.yml)装不到 / 不便装的包。
-# 核心 conda 依赖请用 environment.yml(已含 numpy/pandas/cooler 等)。
+# Agent 用户无需单独安装本文件；`pip install .[agent]` 已包含网页绘图所需依赖。
+# 只有运行 Loop calling 等完整分析脚本时才需要下面的工具。
 
 # === Loop detection(pyHICCUPS CLI,conda 装不到) ===
 hicpeaks>=0.3.0

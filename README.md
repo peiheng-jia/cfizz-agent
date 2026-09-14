@@ -19,7 +19,7 @@ cfizz 是一个端到端的 **Hi-C 染色质构象捕获数据分析与差异分
 
 ### Python 版本
 
-- Python ≥ 3.9
+- Python ≥ 3.10；推荐并持续验证 Python 3.11
 
 ### 完整 Hi-C 流水线 + 依赖分类
 
@@ -79,57 +79,60 @@ cfizz 支持从 **fastq 原始测序数据** 一路到 **publication-ready 图�
 
 > **说明**:上表 A 类的 7 个 CLI 工具(fastp / bwa-mem2 / samtools / pairtools / pairix / cooler / ucsc-fetchchromsizes)虽然列在「环境依赖」中,但仅当你**从 fastq 起始**用 `src/cfizz/preprocessing/` 目录里的参考脚本时才必需;已有 `.mcool` 文件的可以完全跳过。详见上方「完整数据流水线」一节。
 
-### 安装方式(三步走)
+### 安装与启动
 
-cfizz 依赖分两层,推荐用 **micromamba + pip** 组合安装(也支持 mamba / conda):
+Agent 推荐运行在 **Linux、macOS 或 Windows WSL2**，并使用 Python 3.11。原生 Windows 缺少 `pyBigWig`、`pysam`、`cooltools` 的稳定预编译组合，因此不作为默认安装路径。
 
-#### 第 1 步:用 micromamba 一键建环境
-
-```bash
-# 克隆仓库
-git clone https://github.com/Cuixiaojian21/cfizz.git
-cd cfizz
-
-# 用 environment.yml 一键创建 conda 环境(从 conda-forge + bioconda 装)
-micromamba env create -f environment.yml
-micromamba activate cfizz
-```
-
-#### 第 2 步:用 pip 装 pip-only 补充(Loop 检测 CLI + 绘图辅助)
+#### 方式一：micromamba / conda（推荐）
 
 ```bash
-# 推荐:用 requirements.txt 一键装(包含 hicpeaks + adjustText)
-pip install -r requirements.txt
+git clone --depth 1 https://github.com/peiheng-jia/cfizz-agent.git
+cd cfizz-agent
 
-# 或单独装
-# pip install hicpeaks     # 提供 pyHICCUPS CLI(5_1 跑 Loop calling 步骤必需)
-# pip install adjustText   # matplotlib 文本自动避让
+micromamba env create -f environment-agent.yml
+micromamba activate cfizz-agent
+cfizz-agent --check
+cfizz-agent --data-root /path/to/your/experiment
 ```
 
-#### 第 3 步:以可编辑模式装 cfizz 本体
+浏览器打开 <http://127.0.0.1:8000>。没有自己的数据时，可以直接点击“载入 FOXJ1 示例”。
+
+`environment-agent.yml` 是已有 `.cool/.mcool` 数据时的推荐轻量环境。若还要从 FASTQ 开始运行 `fastp`、`bwa-mem2`、`pairtools` 等完整预处理流程，改用 `environment.yml`；该文件现在也会安装 Agent，无需再执行额外的 `pip install -e .`。
+
+#### 方式二：Python 虚拟环境
+
+PyPI 目前只提供 `cooltools` 源码包，因此纯 pip 安装前需要系统 C 编译器。Ubuntu/WSL2 先运行 `sudo apt-get install build-essential`；macOS 先运行 `xcode-select --install`。
 
 ```bash
-pip install -e .
+git clone --depth 1 https://github.com/peiheng-jia/cfizz-agent.git
+cd cfizz-agent
+
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install ".[agent]"
+
+cfizz-agent --check
+cfizz-agent --data-root /path/to/your/experiment
 ```
 
-至此,7 个 example 全部可跑(README 只展示前 6 个;7_2/7_3 仍保留在 `examples/integrated/` 目录供本地自跑)。
-
-#### 验证安装成功
+#### Docker
 
 ```bash
-# 1. 验证 cfizz 本体(在任何目录都能跑,editable 装好之后)
-python -c "import cfizz; print(f'cfizz v{cfizz.__version__} OK')"
-# 期望输出: cfizz v0.1.0 OK
-
-# 2. 验证核心 4 件套(数值 + Hi-C + BigWig + 绘图辅助)
-python -c "import cooler, cooltools, pyBigWig, adjustText; print('core deps OK')"
-# 期望输出: core deps OK
-
-# 3. 验证 pyHICCUPS CLI(Loop 检测必需)
-which pyHICCUPS && pyHICCUPS --version
-# 期望输出: /home/.../bin/pyHICCUPS
-#           pyHICCUPS 0.3.x
+CFIZZ_DATA_DIR=/path/to/your/experiment docker compose up --build -d
+curl http://127.0.0.1:8000/api/health
 ```
+
+Docker/WSL2 是 Windows 用户最稳定的方式。大体积 Hi-C 数据应通过 `--data-root` 或 Docker 只读卷挂载，不需要复制进 GitHub，也不需要经浏览器上传。
+
+#### 验证安装
+
+```bash
+cfizz-agent --version
+cfizz-agent --check
+```
+
+检查命令会核对直接依赖、内置 FOXJ1 示例以及 hg38 / Ensembl 110 完整注释。只有运行 Loop calling 脚本时，才需要 `requirements.txt` 中的 `hicpeaks` / `pyHICCUPS`。
 
 ## 完整数据流水线
 
@@ -235,7 +238,7 @@ FASTA_PATH = "/path/to/your/hg38.fa"  # ⚠️ 改成你自己的 fasta 路径
 
 ## 示例脚本(`cfizz/examples/`)
 
-仓库自带 **7 个端到端 example**(README 展示前 6 个;7_2/7_3 在 examples/ 目录供本地自跑),覆盖 3 大可视化阶段(常规分析 / 差异分析 / 多组学可视化)。所有 example 都已经过 demo 数据集(`cfizz/demo/data/`)验证可跑通,产物落在 `cfizz/demo/output/`。
+仓库保留 **7 个端到端 example 脚本**，覆盖常规分析、差异分析和多组学可视化。脚本已经过项目数据验证，但完整输入、中间产物和输出不会提交；运行前请按各节说明准备本地数据。网页内置 FOXJ1 示例是独立的最小验收数据集。
 
 ### 1. 常规分析(Primary Analysis)
 
@@ -318,7 +321,7 @@ generate_multi_heatmap(
 
 <p align="center">
   <b>1. Heatmap(多 sample 对比,generate_multi_heatmap)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/2_visualization/heatmap/multi/multi_17_10M-12M_10kb_raw_linear.svg" width="500">
+  <img src="docs/images/examples/heatmap-multi.svg" width="500">
 </p>
 
 #### 2. A/B Compartment 多 sample 对比(多 sample eigenvector 对齐)
@@ -351,7 +354,7 @@ generate_multi_compartment(
 
 <p align="center">
   <b>2. A/B Compartment(多 sample 对比,chr17 全长 0-83M,generate_multi_compartment)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/2_visualization/compartment/multi/multi_compartment_100k_chr17_0k-83M.svg" width="700">
+  <img src="docs/images/examples/compartment-multi.svg" width="700">
 </p>
 
 #### 3. TAD 边界 多 sample 对比(半三角 + 各自 insulation)
@@ -399,7 +402,7 @@ quick_plot_integrated(
 
 <p align="center">
   <b>3. TAD 边界(多 sample 对比,quick_plot_integrated + 各自 insulation_path)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/2_visualization/tad/multi/tad_multi.svg" width="500">
+  <img src="docs/images/examples/tad-multi.svg" width="500">
 </p>
 
 #### 4. Loop 标注 多 sample 对比(全三角 + 各自 loops.txt)
@@ -437,7 +440,7 @@ plot_multi_heatmap_with_loops(
 
 <p align="center">
   <b>4. Loop 标注(多 sample 对比,plot_multi_heatmap_with_loops)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/2_visualization/loop/multi/loops_multi.svg" width="500">
+  <img src="docs/images/examples/loops-multi.svg" width="500">
 </p>
 
 #### 5. Heatmap 快速整图版(`quick_plot_integrated`,n_tracks=0)
@@ -479,7 +482,7 @@ quick_plot_integrated(
 
 <p align="center">
   <b>5. Heatmap 快速整图(quick_plot_integrated, n_tracks=0)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/2_visualization/heatmap/quick_plot_integrated/heatmap_quick_plot.svg" width="500">
+  <img src="docs/images/examples/heatmap-integrated.svg" width="500">
 </p>
 
 #### 6. Heatmap + Loop 快速整图版(`quick_plot_integrated` + `loops_path`)
@@ -523,7 +526,7 @@ quick_plot_integrated(
 
 <p align="center">
   <b>6. Heatmap + Loop 快速整图(quick_plot_integrated + 各自 loops_path)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/2_visualization/loop/quick_plot_integrated/quick_plot_integrated.svg" width="500">
+  <img src="docs/images/examples/loop-integrated.svg" width="500">
 </p>
 
 **跑法**:
@@ -582,7 +585,7 @@ generate_multi_saddle(
 
 <p align="center">
   <b>1. Saddle plot(A/B Compartment 交互矩阵,generate_multi_saddle)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/3_pileup/saddle/multi/multi_saddle_plot.svg" width="350">
+  <img src="docs/images/examples/saddle-multi.svg" width="350">
 </p>
 
 #### 2. TAD pileup 多 sample 对比(TAD 边界附近信号堆叠)
@@ -620,7 +623,7 @@ plot_multi_tad_boundary_pileup(
 
 <p align="center">
   <b>2. TAD pileup(边界附近信号堆叠,plot_multi_tad_boundary_pileup)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/3_pileup/tad_pileup/multi/tad_pileup_multi.svg" width="350">
+  <img src="docs/images/examples/tad-pileup-multi.svg" width="350">
 </p>
 
 #### 3. Loop APA 多 sample 对比(Loop 中心信号堆叠)
@@ -658,7 +661,7 @@ plot_multi_apa_heatmap(
 
 <p align="center">
   <b>3. Loop APA(中心信号堆叠,plot_multi_apa_heatmap)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/3_pileup/apa/multi/apa_multi.svg" width="350">
+  <img src="docs/images/examples/apa-multi.svg" width="350">
 </p>
 
 **跑法**:
@@ -725,7 +728,7 @@ analyze_single_comparison(
 
 <p align="center">
   <b>1. Compartment 差异 scatter(hiPSC_var vs hiPSC_nor,plot_compartment_scatter)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/4_differential/hiPSC_var--hiPSC_nor/compartment/compartment_hiPSC_var--hiPSC_nor_scatter.svg" width="400">
+  <img src="docs/images/examples/compartment-diff-scatter.svg" width="400">
 </p>
 
 #### 2. TAD 边界差异(差异分类 + stacked bar,只展示 10b 窗口)
@@ -765,7 +768,7 @@ analyze_single_comparison_window(
 
 <p align="center">
   <b>2. TAD 边界差异 stacked bar(10b window,plot_tad_stacked_bar)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/4_differential/hiPSC_var--hiPSC_nor/tad_boundary/10b/tad_hiPSC_var_hiPSC_nor_10b_stacked_bar.svg" width="500">
+  <img src="docs/images/examples/tad-diff-stacked.svg" width="500">
 </p>
 
 #### 3. Loop 差异(差异分类 + stacked bar)
@@ -792,7 +795,7 @@ analyze_single_comparison_loops(
 
 <p align="center">
   <b>3. Loop 差异 stacked bar(gain / lost / common,plot_loops_stacked_bar)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/4_differential/hiPSC_var--hiPSC_nor/loops/loops_hiPSC_var_hiPSC_nor_stacked_bar.svg" width="500">
+  <img src="docs/images/examples/loop-diff-stacked.svg" width="500">
 </p>
 
 **跑法**:
@@ -857,7 +860,7 @@ plot_multi_compartment(
 
 <p align="center">
   <b>1. Compartment 差异区域 B_to_A(示例:chr17:53.25M-62.25M,plot_multi_compartment)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/4_differential/hiPSC_var--hiPSC_nor/viz/compartment/B_to_A/compartment_chr17_53250000_62250000.svg" width="500">
+  <img src="docs/images/examples/compartment-diff-region.svg" width="500">
 </p>
 
 #### 2. TAD 边界差异(每个 Unique_boundary / Boundary_shift 区域单独画,只展示 10b)
@@ -911,7 +914,7 @@ quick_plot_integrated(
 
 <p align="center">
   <b>2. TAD Unique_boundary(示例:chr17:6.65M-7.20M @ 10b window,quick_plot_integrated)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/4_differential/hiPSC_var--hiPSC_nor/viz/tad_boundary/10b/Unique_boundary/tad_chr17_6650000_7200000_Unique_boundary.svg" width="500">
+  <img src="docs/images/examples/tad-diff-region.svg" width="500">
 </p>
 
 #### 3. Loop 差异区域(每个 gain / lost loop 单独画)
@@ -949,7 +952,7 @@ plot_multi_heatmap_with_loops(
 
 <p align="center">
   <b>3. Loop gain 区域(示例:chr17:65.55M-65.99M,plot_multi_heatmap_with_loops)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/4_differential/hiPSC_var--hiPSC_nor/viz/loops/gain/gain_chr17_65550000_65560000_65980000_65990000.svg" width="500">
+  <img src="docs/images/examples/loop-diff-region.svg" width="500">
 </p>
 
 **跑法**:
@@ -1025,12 +1028,12 @@ plot_multi_tad_boundary_pileup(
 
 <p align="center">
   <b>1. 差异 TAD boundary pileup gain(50b window,plot_multi_tad_boundary_pileup)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/4_differential/hiPSC_var--hiPSC_nor/viz/tad_pileup/gain/50b/tad_pileup_gain_50b.svg" width="350">
+  <img src="docs/images/examples/tad-pileup-gain.svg" width="350">
 </p>
 
 <p align="center">
   <b>2. 差异 TAD boundary pileup lost(50b window)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/4_differential/hiPSC_var--hiPSC_nor/viz/tad_pileup/lost/50b/tad_pileup_lost_50b.svg" width="350">
+  <img src="docs/images/examples/tad-pileup-lost.svg" width="350">
 </p>
 
 #### 2. Loop APA(差异 loop 在双 sample 上的中心堆叠对比)
@@ -1066,12 +1069,12 @@ plot_multi_apa_heatmap(
 
 <p align="center">
   <b>3. 差异 Loop APA gain(plot_multi_apa_heatmap,在 hiPSC_var / hiPSC_nor 上的中心堆叠对比)</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/4_differential/hiPSC_var--hiPSC_nor/viz/loops_apa/gain/loops_apa_gain.svg" width="350">
+  <img src="docs/images/examples/loop-apa-gain.svg" width="350">
 </p>
 
 <p align="center">
   <b>4. 差异 Loop APA lost</b><br>
-  <img src="demo/output/5_1_primary_analysis_template/4_differential/hiPSC_var--hiPSC_nor/viz/loops_apa/lost/loops_apa_lost.svg" width="350">
+  <img src="docs/images/examples/loop-apa-lost.svg" width="350">
 </p>
 
 **跑法**:
@@ -1096,7 +1099,7 @@ python examples/diff/6_3_differential_pileup.py
 
 **示例输出**(7_1 基础多组学可视化 — 单 gene = FOXJ1,8 条 BigWig + GTF + BED):
 <p align="center">
-  <img src="demo/output/7_1_multi_omics_integrated/MultiGene_chr17_75400000_76340000_FOXJ1_hiPSC_var--hiPSC_nor.svg" width="900">
+  <img src="docs/images/examples/foxj1-multi-omics.svg" width="900">
 </p>
 
 **跑法**:
@@ -1104,44 +1107,17 @@ python examples/diff/6_3_differential_pileup.py
 python examples/integrated/7_1_multi_omics_integrated.py
 ```
 
-## Demo 数据集(`cfizz/demo/data/`)
+## 内置 FOXJ1 示例数据
 
-为让用户**开箱即用**,仓库自带 15 MB 演示数据集,覆盖 7 个 example(含本地自跑的 7_2/7_3)所需全部输入文件。
+安装包内置约 **13 MB** 的最小 chr17 / FOXJ1 示例：2 个 `.mcool`、8 条 BigWig、1 个 GTF 和 1 个 BED。它专门用于网页中的“载入 FOXJ1 示例”和自动安装测试，安装后从任意工作目录都能使用。
 
-```
-cfizz/demo/data/
-├── hiPSC_nor_chr17.mcool                              # 6.0 MB,10kb + 100kb 双分辨率,chr17 only
-├── hiPSC_var_chr17.mcool                              # 6.2 MB,同上
-├── FOXJ1.gtf                                          # 5.9 KB,FOXJ1 单 gene(7_1 必需)
-├── ACOX1.gtf / CASKIN2.gtf / FBF1.gtf / GALK1.gtf / GALR2.gtf / ITGB4.gtf  # 单 gene GTF(7_3 必需,共 19 个)
-├── LLGL2.gtf / RECQL5.gtf / RNF157.gtf / SAP30BP.gtf / SRP68.gtf / TMEM94.gtf
-├── TRIM65.gtf / TSEN54.gtf / UBALD2.gtf / UNC13D.gtf / UNK.gtf / WBP2.gtf
-├── concordant_enhancer.chr17_75.4-76.34M.bed          # 200 B,5 行 chr17:75.4-76.34M enhancer
-│
-│ # === 8 条 BigWig 真文件(均以 hiPSC_* 命名,内容已切到 chr17:75.4-76.34M)=== #
-│ # 来源:iPSC 多组学公开数据集的 chr17 区域子集(细胞系 ID 已统一为 hiPSC_nor / hiPSC_var 命名)
-├── hiPSC_nor_chr17_mean.bw                            # 70 KB,RNA mean
-├── hiPSC_var_chr17_mean.bw                            # 80 KB,RNA mean
-├── hiPSC_nor_ATAC-Seq_chr17_mean.bw                    # 69 KB,ATAC-Seq
-├── hiPSC_var_ATAC-Seq_chr17_mean.bw                   # 85 KB,ATAC-Seq
-├── hiPSC_nor_CUTTag-H3K27ac_chr17_mean.bw            # 96 KB,CUTTag-H3K27ac
-├── hiPSC_var_CUTTag-H3K27ac_chr17_mean.bw             # 111 KB,CUTTag-H3K27ac
-├── hiPSC_nor_CUTTag-CTCF_chr17_mean.bw                # 96 KB,CUTTag-CTCF
-├── hiPSC_var_CUTTag-CTCF_chr17_mean.bw               # 106 KB,CUTTag-CTCF
-│
-│ # === 2 条 log2 fold change BigWig === #
-├── ATAC-Seq_hiPSC_var_div_hiPSC_nor_log2.75.4-76.34M.bw            # 119 KB,7_2 log2 track 专用(自跑)
-└── RNA_hiPSC_var_div_hiPSC_nor_log2.75.4-76.34M.bw                 # 95 KB,7_2 log2 track 专用(自跑)
-```
+资源实际位于 `src/cfizz/agent/resources/demo/`，由程序自动解析；用户无需手工填写这个内部路径。仓库根目录的 `demo/` 只保留本地完整分析流程的目录说明，不再假装包含未提交的数据。
 
-**数据源说明**:
-- mcool / GTF / BED / BigWig 来自 iPSC 多组学原始数据(`hiPSC_nor` = 正常 / `hiPSC_var` = 变异)的 chr17 子集,均已切到 chr17:75.4-76.34M(940kb)。
-- 8 条 BigWig 真文件以 `hiPSC_*` 命名(70-110 KB),`hiPSC_*_chr17_mean.bw` 中 `chr17_mean` 仅指覆盖范围,实际数据为已切到 75.4-76.34M 的子集(7_x 脚本按此范围读)。
-- 总大小 **~15 MB**(mcool 12.2 + GTF ~2.1 + bw ~0.96 + log2 0.21),适配 GitHub 直接发布。
+`examples/5_*`、`examples/6_*` 和 `examples/integrated/7_2*`、`7_3*` 是完整分析代码示例，部分步骤依赖上一步计算产物或额外轨道，不承诺仅凭最小网页示例就全部运行。自己的数据应通过 `--data-root`、页面本机上传入口或 Docker 只读卷提供。
 
 ## Demo 输出(`cfizz/demo/output/`)
 
-跑通 7 个 example 后(README 只展示前 6 个;7_2/7_3 仍保留在 examples/ 目录供本地自跑),产出落在 2 个目录。
+准备完整输入并按顺序运行分析 example 后，产出默认落在 2 个本地目录；这些生成结果不会提交到 GitHub。
 
 ```
 cfizz/demo/output/
@@ -1155,9 +1131,9 @@ cfizz/demo/output/
 
 **注意**:`5_1/` 6_x/ 三个 example 共享该目录(5_1 → 5_2 → 5_3 → 6_1 → 6_2 → 6_3 链式依赖,后一步读前一步产物);7_1 独立子目录。
 
-## 完整跑通顺序
+## 完整分析示例顺序（需自行准备完整输入）
 
-按以下顺序跑通 7 个 example(`5_1/5_2/5_3/6_1/6_2/6_3` 严格链式依赖,7_1 独立):
+`5_1/5_2/5_3/6_1/6_2/6_3` 严格链式依赖，`7_1` 独立。内置 FOXJ1 网页示例不包含这些步骤的全部中间产物。
 
 ```bash
 cd /path/to/cfizz
@@ -1192,8 +1168,9 @@ python examples/integrated/7_1_multi_omics_integrated.py
 cfizz/
 ├── pyproject.toml          # pip 安装元数据(src 布局:package-dir = "src")
 ├── MANIFEST.in             # 打包清单(指向 src/cfizz/)
-├── environment.yml         # conda 环境一键创建(核心 conda 依赖)
-├── requirements.txt        # pip 补充依赖(hicpeaks 等)
+├── environment-agent.yml   # 推荐：网页 Agent 轻量 conda 环境
+├── environment.yml         # 完整分析 + fastq 预处理 conda 环境
+├── requirements.txt        # 完整分析可选补充(hicpeaks 等)
 ├── LICENSE                 # MIT
 ├── README.md               # 本文件
 ├── CONTRIBUTING.md         # 贡献指南 + 4 大设计哲学
@@ -1205,6 +1182,8 @@ cfizz/
 │       ├── analyze/                # 核心算法(compartment / TAD / loop / O/E)
 │       ├── viz/                    # 可视化模块(heatmap / tracks / pileup / layout)
 │       ├── api/                    # 高级 API(quickplot + integrated)
+│       ├── agent/                  # 对话式 Web 工作台
+│       │   └── resources/          # 内置 FOXJ1 示例 + hg38 完整注释
 │       ├── utils/                  # 通用工具(coordinates / range)
 │       └── preprocessing/          # 上游预处理参考脚本(fastq → mcool,可选,非强制)
 │           ├── fastq2pairs.sh      # bash: fastp + bwa-mem2 + pairtools 包装
@@ -1223,32 +1202,26 @@ cfizz/
 │       ├── 7_1_multi_omics_integrated.py   # README 展示的 7_×
 │       ├── 7_2_log2_tracks.py              # 仓库保留,本地自跑
 │       └── 7_3_multi_gene.py               # 仓库保留,本地自跑
-└── demo/                   # Demo 数据集 + 输出(不打包)
-    ├── data/               # 15 MB 输入数据(2 mcool + 2 gtf + 1 bed + 10 bw)
-    └── output/             # 跑 7 个 example 后生成的产物
+└── demo/                   # 本地完整流程的数据/输出占位说明（不提交大数据）
 ```
 
-## 对话式绘图 Agent（开发中）
+## 对话式绘图 Agent
 
-仓库现已包含面向对话式可视化的确定性后端初稿：数据探查、FigureSpec 校验和 cfizz 渲染适配器。产品目标、交互原则与实现路线见 [`docs/agent-product-spec.md`](docs/agent-product-spec.md)，FigureSpec 示例见 [`docs/examples/figure-spec.integrated-demo.json`](docs/examples/figure-spec.integrated-demo.json)。
+CFIZZ Agent 已提供可安装的本地/服务器 Web 工作台，包含数据探查、图形选择、FigureSpec 校验、cfizz 确定性渲染、版本历史、导出以及可选的 OpenAI/DeepSeek 语言理解。产品约束与交互原则见 [`docs/agent-product-spec.md`](docs/agent-product-spec.md)，FigureSpec 示例见 [`docs/examples/figure-spec.integrated-demo.json`](docs/examples/figure-spec.integrated-demo.json)。
 
 ### 从 GitHub 安装并启动
 
-发布包只包含程序、网页资源和文档；实验数据、生成的图、缓存及大型参考注释均不上传。用户需要准备自己的数据目录，并在启动时授权读取：
+从 GitHub 安装时会一并获得网页资源、最小 FOXJ1 示例和 hg38 / Ensembl 110 完整注释；不会包含用户实验数据、生成图、会话或缓存。推荐按本文前面的“安装与启动”创建 Python 3.11 环境，也可直接从仓库 checkout 安装：
 
 ```bash
-python -m pip install "cfizz[agent,all]"
+git clone --depth 1 https://github.com/peiheng-jia/cfizz-agent.git
+cd cfizz-agent
+python -m pip install ".[agent]"
+cfizz-agent --check
 cfizz-agent --data-root /path/to/your/experiment
 ```
 
-Windows PowerShell 示例：
-
-```powershell
-py -m pip install "cfizz[agent,all]"
-cfizz-agent --data-root "D:\\project\\case1"
-```
-
-浏览器打开 <http://127.0.0.1:8000>。有多个数据目录时重复 `--data-root`；也可用 `--host`、`--port` 和 `--runtime-dir` 指定监听地址及运行时文件目录。若从源码运行，继续使用下面的 `examples/agent/run_web.py` 即可。
+浏览器打开 <http://127.0.0.1:8000>。有多个数据目录时重复 `--data-root`；也可用 `--host`、`--port` 和 `--runtime-dir` 指定监听地址及运行时文件目录。Windows 请在 WSL2 中执行相同命令，或使用 Docker Desktop；不建议原生 PowerShell 安装科学依赖。
 
 在尚未安装完整绘图依赖时，也可以先检查数据并生成渲染计划：
 
@@ -1271,7 +1244,7 @@ PYTHONPATH=src python examples/agent/edit_session.py \
 
 ```bash
 # 在已安装 cfizz 科学依赖的环境中安装 Web 组件
-pip install -e ".[agent,all]"
+pip install -e ".[agent]"
 
 # 默认只允许读取项目目录；可重复传入 --data-root 授权其他数据目录
 python examples/agent/run_web.py --data-root /path/to/your/data
@@ -1283,7 +1256,7 @@ python examples/agent/run_web.py --data-root /path/to/your/data
 
 也可以在“从实验数据目录生成多组学图”中输入一个已授权的项目目录和目标基因（例如 `FOXJ1`）。Agent 会只读扫描目录中的 `.cool/.mcool`、BigWig、GTF/GFF、BED/BEDPE、E1 和 Loop 结果，推测样本分组与实验类型，并先展示识别摘要；确认后即可自动生成 FOXJ1 风格的 Hi-C + 基因 + 信号轨道整合图。目录不在当前授权范围时，可在页面中点击“授权此目录并重试”，授权只在当前服务进程有效。
 
-参考数据与实验数据分开管理。发布包不携带大型 GTF/Tabix/索引文件；安装后可通过数据目录授权或挂载 `references/hg38/` 提供 `Ensembl 110 / GRCh38.p14` 注释（项目中的 `references/hg38/README.md` 给出文件格式和索引命令）。提供完整参考后，用户可以直接输入 `TP53`、`MYC`、`BRCA1` 或 Ensembl gene ID（如 `ENSG00000141510`），Agent 会定位基因、切换视野，并按区域提取基因轨道。没有完整参考时，仍可使用用户提供的 GTF/GFF；FOXJ1 保留内置坐标作为最小演示兜底。使用其他 assembly（如 hg19）、其他注释版本或自定义注释时，应另行提供相应 GTF/GFF。参考 FASTA 只有在序列、motif 或 GC 分析时才需要，普通 Hi-C/BigWig/基因结构绘图不要求用户重复提供。
+参考数据与实验数据分开管理。安装包自带 `Ensembl 110 / GRCh38.p14` 的压缩 GTF、Tabix 和基因索引，因此 hg38 用户可以直接输入 `TP53`、`MYC`、`BRCA1` 或 Ensembl gene ID（如 `ENSG00000141510`），Agent 会定位基因、切换视野，并按区域提取基因轨道。项目根目录或挂载卷中的 `references/hg38/` 可覆盖内置版本；使用其他 assembly、其他注释版本或自定义注释时，应上传匹配的 GTF/GFF。参考 FASTA 只有在序列、motif 或 GC 分析时才需要，普通 Hi-C/BigWig/基因结构绘图不要求用户重复提供。
 
 自动组图接口也可直接调用：
 

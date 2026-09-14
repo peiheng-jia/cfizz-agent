@@ -23,7 +23,7 @@ COPY pyproject.toml MANIFEST.in README.md LICENSE ./
 COPY src ./src
 
 RUN python -m pip install --upgrade pip setuptools wheel \
-    && python -m pip wheel --wheel-dir /wheels ".[agent]" "pyBigWig>=0.3"
+    && python -m pip wheel --wheel-dir /wheels ".[agent]"
 
 
 FROM python:3.11-slim-bookworm
@@ -37,19 +37,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY --from=builder /wheels /wheels
-RUN python -m pip install --no-index --find-links=/wheels "cfizz[agent]" pyBigWig \
+RUN python -m pip install --no-index --find-links=/wheels "cfizz[agent]" \
+    && cfizz-agent --check \
     && rm -rf /wheels
 
-# The demo endpoint reads its FigureSpec from docs at runtime. Large input and
-# reference directories are mounted separately by Compose.
-COPY docs ./docs
-
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin cfizz \
-    && mkdir -p /var/lib/cfizz /data /uploads /app/demo /app/references \
+    && mkdir -p /var/lib/cfizz /data /uploads /app/references \
     && chown -R cfizz:cfizz /var/lib/cfizz /uploads
 
 USER cfizz
 
 EXPOSE 8000
 
-CMD ["cfizz-agent", "--host", "0.0.0.0", "--port", "8000", "--runtime-dir", "/var/lib/cfizz", "--data-root", "/data", "--data-root", "/uploads", "--data-root", "/app/demo", "--data-root", "/app/references"]
+CMD ["cfizz-agent", "--host", "0.0.0.0", "--port", "8000", "--runtime-dir", "/var/lib/cfizz", "--data-root", "/data", "--data-root", "/uploads", "--data-root", "/app/references"]

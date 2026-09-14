@@ -1,9 +1,12 @@
-# Demo data (not included)
+# Local full-pipeline data (not included)
 
-The GitHub source release intentionally contains the demo layout and
-documentation, but not experiment files or generated figures.  To try the
-examples, provide a local directory containing your own `.cool`/`.mcool` and
-optional track files, then authorize it when starting the Agent:
+The GitHub repository does not commit full-pipeline inputs, intermediate
+results or generated figures in this top-level folder. The installed Agent
+does include a separate 13 MB FOXJ1 browser demo under its package resources;
+load it with the “载入 FOXJ1 示例” button.
+
+To work with your own data, provide a directory containing `.cool`/`.mcool`
+and optional track files, then authorize it when starting the Agent:
 
 ```bash
 cfizz-agent --data-root /path/to/your/data
