@@ -49,4 +49,5 @@ jobs:
 
       - name: Unit-test bundled resources
         run: |
-          PYTHONPATH=src python -m unittest tests.agent.test_bundled
+          smoke_env="${RUNNER_TEMP}/cfizz-wheel-${{ matrix.python-version }}"
+          "${smoke_env}/bin/python" -m unittest tests.agent.test_bundled
