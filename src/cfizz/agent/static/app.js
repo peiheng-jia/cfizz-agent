@@ -1,8 +1,8 @@
-const EXPECTED_API_REVISION = 13;
+const EXPECTED_API_REVISION = 14;
 const LOCAL_UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024;
 const LOCAL_UPLOAD_SUFFIXES = new Set(['.cool','.mcool','.bw','.bigwig','.gtf','.gff','.gff3','.bed','.bedpe','.tsv','.txt','.npy']);
 const storedFigureZoom = Number.parseInt(localStorage.getItem('cfizz-figure-zoom') || '', 10);
-const state = { sessionId: null, session: null, chatSessionPromise: null, activeJob: null, provider: 'local', planners: [], figureTypes: [], referenceBuilds: [], datasetScan: null, datasetSources: [], activeDatasetKey: null, pendingDatasetPath: null, pendingDatasetOptions: null, datasetSourceRestoring: false, activeWorkflow: null, fileOverrides: {}, renderTimer: null, renderStartedAt: null, language: localStorage.getItem('cfizz-language') || 'zh-CN', regionEdited: false, figureZoom: Number.isFinite(storedFigureZoom) && storedFigureZoom >= 40 && storedFigureZoom <= 200 ? storedFigureZoom : 80 };
+const state = { sessionId: null, session: null, chatSessionPromise: null, activeJob: null, datasetActionInFlight: false, datasetPreviewController: null, provider: 'local', planners: [], figureTypes: [], referenceBuilds: [], datasetScan: null, datasetSources: [], activeDatasetKey: null, pendingDatasetPath: null, pendingDatasetOptions: null, datasetSourceRestoring: false, activeWorkflow: null, fileOverrides: {}, renderTimer: null, renderStartedAt: null, language: localStorage.getItem('cfizz-language') || 'zh-CN', regionEdited: false, figureZoom: Number.isFinite(storedFigureZoom) && storedFigureZoom >= 40 && storedFigureZoom <= 200 ? storedFigureZoom : 80 };
 const $ = (id) => document.getElementById(id);
 
 function openDialog(id, focusId='') {
@@ -90,26 +90,57 @@ function formatViewport(viewport) {
 }
 let datasetRegionPreviewTimer = null;
 let datasetRegionPreviewRequest = 0;
+function cancelDatasetRegionPreview() {
+  clearTimeout(datasetRegionPreviewTimer);
+  datasetRegionPreviewTimer = null;
+  datasetRegionPreviewRequest += 1;
+  state.datasetPreviewController?.abort();
+  state.datasetPreviewController = null;
+}
+function beginDatasetAction() {
+  if (state.datasetActionInFlight || state.activeJob) {
+    setStatus(
+      state.language === 'en' ? 'A figure task is already running' : '已有绘图任务正在处理',
+      'running',
+      state.language === 'en' ? 'Wait for the current task to finish before submitting another.' : '请等待当前任务完成，不需要重复点击。',
+    );
+    return false;
+  }
+  state.datasetActionInFlight = true;
+  cancelDatasetRegionPreview();
+  updateDatasetSelectionSummary(false);
+  return true;
+}
+function finishDatasetAction() {
+  state.datasetActionInFlight = false;
+  updateDatasetSelectionSummary(false);
+}
 function scheduleDatasetRegionPreview(delay=350) {
   clearTimeout(datasetRegionPreviewTimer);
   const requestId = ++datasetRegionPreviewRequest;
-  if (!state.datasetScan) return;
+  state.datasetPreviewController?.abort();
+  state.datasetPreviewController = null;
+  if (!state.datasetScan || state.datasetActionInFlight || state.activeJob) return;
   const error = datasetRegionError();
   if (error) { setDatasetRegionStatus(error, 'error'); return; }
   setDatasetRegionStatus(t('regionPreviewing'), 'checking');
   datasetRegionPreviewTimer = setTimeout(() => { void previewDatasetRegion(requestId); }, delay);
 }
 async function previewDatasetRegion(requestId) {
-  if (requestId !== datasetRegionPreviewRequest || !state.datasetScan) return;
+  if (requestId !== datasetRegionPreviewRequest || !state.datasetScan || state.datasetActionInFlight || state.activeJob) return;
   const item = currentFigureTypeItem();
   const readiness = workflowReadiness(item);
   if (!item || !readiness.ready) {
     setDatasetRegionStatus(t('regionNeedsInputs', readiness.missing || t('requiredInput')));
     return;
   }
+  const controller = new AbortController();
+  state.datasetPreviewController?.abort();
+  state.datasetPreviewController = controller;
   try {
     const response = await api('/api/sessions/from-dataset', {
       method:'POST',
+      signal:controller.signal,
       body:JSON.stringify({
         session_id:`viewport_preview_${Date.now()}`,
         preview_only:true,
@@ -136,8 +167,11 @@ async function previewDatasetRegion(requestId) {
       setDatasetRegionStatus(t('regionAutoExpected', label, reason), 'ready');
     }
   } catch (error) {
+    if (error?.name === 'AbortError') return;
     if (requestId !== datasetRegionPreviewRequest) return;
     setDatasetRegionStatus(error.message || t('regionPreviewUnavailable'), datasetRegionMode() === 'manual' ? 'error' : '');
+  } finally {
+    if (state.datasetPreviewController === controller) state.datasetPreviewController = null;
   }
 }
 function updateDatasetRegionControl() {
@@ -1071,6 +1105,7 @@ async function startWorkflow(item, displayLabel, workflowPaths=selectedDatasetPa
     return;
   }
   if ((!state.sessionId || isDraftSession()) && state.datasetScan) {
+    if (!beginDatasetAction()) return;
     try {
       hint.hidden = true;
       setStatus(t('workflowBuilding'), 'running', t('preparing'));
@@ -1100,6 +1135,8 @@ async function startWorkflow(item, displayLabel, workflowPaths=selectedDatasetPa
         'failed',
       );
       addMessage('assistant', error.message, 'ui:workflow');
+    } finally {
+      finishDatasetAction();
     }
     return;
   }
@@ -1113,6 +1150,7 @@ async function startWorkflow(item, displayLabel, workflowPaths=selectedDatasetPa
     target.scrollIntoView({behavior:'smooth', block:'center'});
     return;
   }
+  if (!beginDatasetAction()) return;
   try {
     setStatus(state.language === 'en' ? 'Starting workflow' : '正在启动工作流', 'running', t('preparing'));
     const payload = await api(`/api/sessions/${state.sessionId}/workflow`, {
@@ -1147,6 +1185,8 @@ async function startWorkflow(item, displayLabel, workflowPaths=selectedDatasetPa
       'failed',
     );
     addMessage('assistant', error.message, 'ui:workflow');
+  } finally {
+    finishDatasetAction();
   }
 }
 function updateFigureTypeHint() {
@@ -1380,43 +1420,61 @@ function setApiConfigStatus(text, kind='') {
 async function watchJob(job) {
   if (!job) return;
   state.activeJob = job.job_id;
+  updateDatasetSelectionSummary(false);
   $('previewQuality').hidden = true;
   for (const id of ['svgDownload','pngDownload','pdfDownload']) {
     $(id).href = '#'; $(id).classList.add('disabled');
   }
   state.renderStartedAt = Date.now();
   setStatus(t('rendering'), 'running', state.language === 'en' ? 'Task submitted; waiting for the CFIZZ renderer…' : '任务已提交，正在等待绘图引擎……');
-  while (state.activeJob === job.job_id) {
-    const current = await api(`/api/jobs/${job.job_id}`);
-    if (current.status === 'queued') setStatus(t('queued'), 'running', state.language === 'en' ? 'The task is queued and will start shortly.' : '任务已进入队列，即将开始。');
-    if (current.status === 'running') setStatus(t('drawing'), 'running', state.language === 'en' ? 'Reading region data, laying out tracks, and exporting files…' : '正在读取区域数据、布局轨道并导出图片……');
-    if (current.status === 'succeeded') {
-      const png = current.artifact_urls.find(path => path.endsWith('.png'));
-      const svg = current.artifact_urls.find(path => path.endsWith('.svg'));
-      const pdf = current.artifact_urls.find(path => path.endsWith('.pdf'));
-      const preview = svg || png;
-      if (preview) {
-        const isVector = Boolean(svg);
-        $('figureImage').src = `${preview}?t=${Date.now()}`;
-        $('figureImage').classList.toggle('vector-preview', isVector);
-        $('figureImage').dataset.previewFormat = isVector ? 'svg' : 'png';
-        $('figureImage').hidden = false;
-        $('figurePreviewFrame').hidden = false;
-        $('figureZoomControl').hidden = false;
-        $('emptyState').hidden = true;
-        $('canvas').classList.remove('empty');
-        $('previewQuality').textContent = t(isVector ? 'vectorPreview' : 'rasterPreview');
-        $('previewQuality').hidden = false;
+  try {
+    while (state.activeJob === job.job_id) {
+      const current = await api(`/api/jobs/${job.job_id}`);
+      if (current.status === 'queued') setStatus(t('queued'), 'running', state.language === 'en' ? 'The task is queued and will start shortly.' : '任务已进入队列，即将开始。');
+      if (current.status === 'running') setStatus(t('drawing'), 'running', state.language === 'en' ? 'Reading region data, laying out tracks, and exporting files…' : '正在读取区域数据、布局轨道并导出图片……');
+      if (current.status === 'succeeded') {
+        const png = current.artifact_urls.find(path => path.endsWith('.png'));
+        const svg = current.artifact_urls.find(path => path.endsWith('.svg'));
+        const pdf = current.artifact_urls.find(path => path.endsWith('.pdf'));
+        const preview = svg || png;
+        if (preview) {
+          const isVector = Boolean(svg);
+          $('figureImage').src = `${preview}?t=${Date.now()}`;
+          $('figureImage').classList.toggle('vector-preview', isVector);
+          $('figureImage').dataset.previewFormat = isVector ? 'svg' : 'png';
+          $('figureImage').hidden = false;
+          $('figurePreviewFrame').hidden = false;
+          $('figureZoomControl').hidden = false;
+          $('emptyState').hidden = true;
+          $('canvas').classList.remove('empty');
+          $('previewQuality').textContent = t(isVector ? 'vectorPreview' : 'rasterPreview');
+          $('previewQuality').hidden = false;
+        }
+        if (svg) { $('svgDownload').href=svg; $('svgDownload').classList.remove('disabled'); }
+        if (png) { $('pngDownload').href=png; $('pngDownload').classList.remove('disabled'); }
+        if (pdf) { $('pdfDownload').href=pdf; $('pdfDownload').classList.remove('disabled'); }
+        setStatus(t('completed'), 'success');
+        $('canvas').classList.remove('just-completed'); void $('canvas').offsetWidth; $('canvas').classList.add('just-completed');
+        state.activeJob=null;
+        updateDatasetSelectionSummary(false);
+        return;
       }
-      if (svg) { $('svgDownload').href=svg; $('svgDownload').classList.remove('disabled'); }
-      if (png) { $('pngDownload').href=png; $('pngDownload').classList.remove('disabled'); }
-      if (pdf) { $('pdfDownload').href=pdf; $('pdfDownload').classList.remove('disabled'); }
-      setStatus(t('completed'), 'success');
-      $('canvas').classList.remove('just-completed'); void $('canvas').offsetWidth; $('canvas').classList.add('just-completed');
-      state.activeJob=null; return;
+      if (current.status === 'failed') {
+        setStatus(t('failed'), 'failed');
+        addMessage('assistant', current.error);
+        state.activeJob=null;
+        updateDatasetSelectionSummary(false);
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 800));
     }
-    if (current.status === 'failed') { setStatus(t('failed'), 'failed'); addMessage('assistant', current.error); state.activeJob=null; return; }
-    await new Promise(resolve => setTimeout(resolve, 800));
+  } catch (error) {
+    if (state.activeJob === job.job_id) {
+      state.activeJob = null;
+      setStatus(t('failed'), 'failed');
+      addMessage('assistant', error.message || (state.language === 'en' ? 'Could not read render status.' : '无法读取绘图任务状态。'));
+      updateDatasetSelectionSummary(false);
+    }
   }
 }
 $('chatTab').addEventListener('click', () => switchSidebar('chat'));
@@ -2095,7 +2153,7 @@ function newSelectedTrackFiles() {
   const existing = new Set((state.session?.spec?.data_sources || []).map(source => datasetPathKey(source.path)));
   return selectedTrackFiles().filter(file => !existing.has(datasetPathKey(file.path)));
 }
-function updateDatasetSelectionSummary() {
+function updateDatasetSelectionSummary(schedulePreview=true) {
   const picker = $('datasetFiles').querySelector('.dataset-file-picker');
   if (!picker) { hideFigureReadinessHint(); updateDatasetResolutionControl(); updateWorkflowReadiness(); updateDatasetRegionControl(); syncReferenceChoiceFromFiles(); return; }
   const item = currentFigureTypeItem();
@@ -2117,6 +2175,7 @@ function updateDatasetSelectionSummary() {
   const tracksUnsupported = selectedTracks.length > 0 && !trackFigureSupported;
   const selectionMismatch = Boolean(rule && !validHicCount);
   const regionError = datasetRegionError();
+  const actionBusy = state.datasetActionInFlight || Boolean(state.activeJob);
   // A track selection must never prevent the selected Hi-C figure from being
   // built. Unsupported tracks remain available for an integrated workflow.
   const canBuildFigure = selectedHics.length > 0 && validHicCount && figureReady && !regionError;
@@ -2173,13 +2232,15 @@ function updateDatasetSelectionSummary() {
     row.classList.toggle('selected', Boolean(row.querySelector('input[data-dataset-path]')?.checked));
   });
   updateFigureReadinessHint(readiness, selectionMismatch, rule);
-  $('buildDataset').disabled = !canBuildFigure;
+  $('buildDataset').disabled = actionBusy || !canBuildFigure;
   $('addTracksDataset').hidden = !state.sessionId || isDraftSession() || !selectedTracks.length || !trackFigureSupported;
-  $('addTracksDataset').disabled = !newTracks.length || !trackFigureSupported;
+  $('addTracksDataset').disabled = actionBusy || !newTracks.length || !trackFigureSupported;
   $('addTracksDataset').textContent = newTracks.length
     ? (state.language === 'en' ? `Add ${newTracks.length} new track${newTracks.length === 1 ? '' : 's'} to current figure` : `添加 ${newTracks.length} 条新轨道到当前图`)
     : t('trackAlreadyPresent');
-  $('buildDataset').textContent = canBuildFigure
+  $('buildDataset').textContent = actionBusy
+      ? (state.language === 'en' ? 'Preparing figure…' : '正在准备图形…')
+      : canBuildFigure
       ? (state.language === 'en'
         ? `Build “${item?.label || 'figure'}”${tracksUnsupported ? ` ${t('tracksExcluded')}` : ''}`
         : `生成「${item?.label || '所选图形'}」${tracksUnsupported ? t('tracksExcluded') : ''}`)
@@ -2188,7 +2249,9 @@ function updateDatasetSelectionSummary() {
       : selectionMismatch
         ? (state.language === 'en' ? `Adjust Hi-C selection (${cardinalityText(rule)})` : `调整 Hi-C 选择（${cardinalityText(rule)}）`)
         : (state.language === 'en' ? `Missing: ${readiness.missing || 'required input'}` : `缺少：${readiness.missing || '所需输入'}`);
-  $('buildDataset').title = canBuildFigure ? '' : (regionError
+  $('buildDataset').title = actionBusy
+    ? (state.language === 'en' ? 'The current request is still running.' : '当前请求仍在处理中，请勿重复提交。')
+    : canBuildFigure ? '' : (regionError
     ? regionError
     : selectionMismatch
     ? (state.language === 'en' ? `Select ${cardinalityText(rule)}.` : `请选择${cardinalityText(rule)}。`)
@@ -2202,7 +2265,7 @@ function updateDatasetSelectionSummary() {
   updateWorkflowReadiness();
   saveActiveDatasetSourceView();
   syncReferenceChoiceFromFiles();
-  scheduleDatasetRegionPreview();
+  if (schedulePreview) scheduleDatasetRegionPreview();
 }
 function renderDatasetFiles(scan, selectedPaths=null, fillMinimum=false) {
   const target = $('datasetFiles');
@@ -2353,7 +2416,7 @@ async function scanDatasetPath(path, options={}) {
   $('buildDataset').disabled = true;
   try {
     const scan = await api('/api/datasets/scan', {
-      method:'POST', body:JSON.stringify({path, gene, reference_build:referenceBuild, file_overrides:overrides})
+      method:'POST', body:JSON.stringify({path, gene, reference_build:referenceBuild, file_overrides:overrides, refresh:Boolean(options.refresh)})
     });
     const canonicalKey = datasetPathKey(scan.root || path);
     const saved = state.datasetSources.find(source => source.key === canonicalKey) || existing;
@@ -2519,6 +2582,7 @@ $('buildDataset').addEventListener('click', async () => {
   const selected = state.datasetScan;
   if (!selected) return;
   if (!requireValidDatasetRegion()) return;
+  if (!beginDatasetAction()) return;
   try {
     $('buildDataset').disabled = true;
     const chosenPaths = selectedDatasetPaths();
@@ -2551,7 +2615,7 @@ $('buildDataset').addEventListener('click', async () => {
     setStatus(state.language === 'en' ? 'Figure creation failed' : '图形生成失败', 'failed');
     addMessage('assistant', error.message, 'data:directory');
   }
-  finally { updateDatasetSelectionSummary(); }
+  finally { finishDatasetAction(); }
 });
 $('addTracksDataset').addEventListener('click', async () => {
   const selected = state.datasetScan;
@@ -2561,6 +2625,7 @@ $('addTracksDataset').addEventListener('click', async () => {
     addMessage('assistant', t('trackAlreadyPresent'), 'data:directory');
     return;
   }
+  if (!beginDatasetAction()) return;
   try {
     $('addTracksDataset').disabled = true;
     setStatus(t('addingTracks'), 'running', state.language === 'en' ? 'Checking chromosome compatibility and passing the tracks to the official CFIZZ renderer…' : '正在检查染色体兼容性，并交给 CFIZZ 官方接口组织轨道……');
@@ -2582,7 +2647,7 @@ $('addTracksDataset').addEventListener('click', async () => {
     setStatus(state.language === 'en' ? 'Track addition failed' : '轨道添加失败', 'failed');
     addMessage('assistant', error.message, 'data:directory');
   } finally {
-    updateDatasetSelectionSummary();
+    finishDatasetAction();
   }
 });
 $('chatForm').addEventListener('submit', async (event) => {
@@ -2675,6 +2740,7 @@ $('applyFigureType').addEventListener('click', async () => {
   const item = state.figureTypes.find(value => value.id === figureType);
   if ((!state.sessionId || isDraftSession()) && state.datasetScan) {
     if (!requireValidDatasetRegion()) return;
+    if (!beginDatasetAction()) return;
     try {
       setStatus(state.language === 'en' ? 'Building selected figure' : '正在生成所选图形', 'running', t('preparing'));
       const sessionId = `dataset_${Date.now()}`;
@@ -2694,10 +2760,13 @@ $('applyFigureType').addEventListener('click', async () => {
     } catch (error) {
       setStatus(state.language === 'en' ? 'Figure creation failed' : '图形生成失败', 'failed');
       addMessage('assistant', error.message, 'data:directory');
+    } finally {
+      finishDatasetAction();
     }
     return;
   }
   if (!state.sessionId) return;
+  if (!beginDatasetAction()) return;
   try {
     const payload = await api(`/api/sessions/${state.sessionId}/patch`, {
       method:'POST', body:JSON.stringify({patch:{summary:`切换图类型为 ${item.label}`,operations:[
@@ -2709,6 +2778,7 @@ $('applyFigureType').addEventListener('click', async () => {
     addMessage('assistant', `已切换为${item.label}，区域、分辨率和数据源保持不变。`);
     updateSession(payload); watchJob(payload.job);
   } catch(error) { addMessage('assistant', error.message); }
+  finally { finishDatasetAction(); }
 });
 applyLanguage(state.language);
 applyFigureZoom();

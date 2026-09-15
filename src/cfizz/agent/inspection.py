@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import math
@@ -51,11 +52,25 @@ class InspectionResult:
 class DataInspector:
     """Inspect files without allowing access outside explicitly allowed roots."""
 
-    def __init__(self, allowed_roots: Optional[Sequence[str]] = None, max_text_rows: int = 10_000):
+    def __init__(
+        self,
+        allowed_roots: Optional[Sequence[str]] = None,
+        max_text_rows: int = 10_000,
+        max_cached_files: int = 4_096,
+    ):
         roots = allowed_roots or [str(Path.cwd())]
         self.allowed_roots = tuple(Path(root).expanduser().resolve() for root in roots)
         self._roots_lock = threading.RLock()
         self.max_text_rows = max_text_rows
+        self.max_cached_files = max(1, int(max_cached_files))
+        # Dataset discovery can inspect the same large collection several
+        # times while the user changes figure type, region, or file selection.
+        # Cache metadata by immutable file identity so those UI operations do
+        # not repeatedly sample up to 10,000 text rows or reopen HDF5 files.
+        self._inspection_cache: OrderedDict[
+            tuple[str, str, int, int], InspectionResult
+        ] = OrderedDict()
+        self._inspection_cache_lock = threading.RLock()
 
     def authorize_root(self, path: str) -> Path:
         """Authorize one user-selected directory for the current process."""
@@ -115,29 +130,76 @@ class DataInspector:
             )
 
         try:
-            if data_type in {"cool", "mcool"}:
-                return self._inspect_cooler(resolved, data_type)
-            if data_type == "bigwig":
-                return self._inspect_bigwig(resolved)
-            if data_type in {"gtf", "gff", "bed", "bedpe", "tsv", "insulation_tsv", "tad_tsv", "loop_tsv", "compartment_tsv"}:
-                return self._inspect_text(resolved, data_type)
+            stat = resolved.stat()
+        except OSError as exc:
             return InspectionResult(
                 path=str(resolved),
                 type=data_type,
                 exists=True,
-                readable=True,
-                size_bytes=resolved.stat().st_size,
-                warnings=["暂时只能确认该文件存在，尚不能解析其内部元数据。"],
+                readable=False,
+                error=f"文件无法读取：{exc}",
             )
+        cache_key = (str(resolved), data_type, stat.st_mtime_ns, stat.st_size)
+        with self._inspection_cache_lock:
+            cached = self._inspection_cache.get(cache_key)
+            if cached is not None:
+                self._inspection_cache.move_to_end(cache_key)
+                return cached
+
+        try:
+            if data_type in {"cool", "mcool"}:
+                result = self._inspect_cooler(resolved, data_type)
+            elif data_type == "bigwig":
+                result = self._inspect_bigwig(resolved)
+            elif data_type in {"gtf", "gff", "bed", "bedpe", "tsv", "insulation_tsv", "tad_tsv", "loop_tsv", "compartment_tsv"}:
+                result = self._inspect_text(resolved, data_type)
+            else:
+                result = InspectionResult(
+                    path=str(resolved),
+                    type=data_type,
+                    exists=True,
+                    readable=True,
+                    size_bytes=stat.st_size,
+                    warnings=["暂时只能确认该文件存在，尚不能解析其内部元数据。"],
+                )
         except (OSError, ValueError, RuntimeError) as exc:
             return InspectionResult(
                 path=str(resolved),
                 type=data_type,
                 exists=True,
                 readable=False,
-                size_bytes=resolved.stat().st_size,
+                size_bytes=stat.st_size,
                 error=f"文件无法解析：{exc}",
             )
+        if result.usable:
+            with self._inspection_cache_lock:
+                self._inspection_cache[cache_key] = result
+                self._inspection_cache.move_to_end(cache_key)
+                while len(self._inspection_cache) > self.max_cached_files:
+                    self._inspection_cache.popitem(last=False)
+        return result
+
+    def invalidate_cache(self, root: Optional[str] = None) -> None:
+        """Forget cached metadata below *root*, or all metadata when omitted.
+
+        File size and mtime already protect normal replacements.  Explicit
+        invalidation is still used by the web app's Refresh and Upload actions
+        so users always receive a fresh inspection when they ask for one.
+        """
+        with self._inspection_cache_lock:
+            if root is None:
+                self._inspection_cache.clear()
+                return
+            candidate = self.platform_path(str(root)).expanduser()
+            if not candidate.is_absolute():
+                candidate = Path.cwd() / candidate
+            resolved = candidate.resolve()
+            stale = [
+                key for key in self._inspection_cache
+                if self._is_within(Path(key[0]), resolved)
+            ]
+            for key in stale:
+                self._inspection_cache.pop(key, None)
 
     def inspect_many(self, sources: Iterable[Dict[str, Any]]) -> Dict[str, InspectionResult]:
         return {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
@@ -19,6 +20,7 @@ from urllib.parse import unquote
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field, SecretStr
+from starlette.concurrency import run_in_threadpool
 
 from cfizz import __version__
 
@@ -39,6 +41,7 @@ from .dataset import (
     build_workflow_spec,
     build_track_patch,
     prepare_workflow_selection,
+    resolve_dataset_query,
     scan_dataset,
     select_dataset_files,
     _suggest_workflow_bindings,
@@ -149,6 +152,7 @@ class DatasetScanBody(BaseModel):
     reference_build: str = "hg38"
     selected_paths: Optional[list[str]] = None
     file_overrides: Dict[str, Dict[str, str]] = Field(default_factory=dict)
+    refresh: bool = False
 
 
 class DatasetAuthorizeBody(BaseModel):
@@ -207,7 +211,106 @@ class WorkspaceService:
         self.pending_actions: Dict[str, Dict[str, Any]] = {}
         self.dialogue_history: Dict[str, list[Dict[str, str]]] = {}
         self._lock = threading.RLock()
+        self._dataset_scan_cache: OrderedDict[tuple[Any, ...], DatasetScan] = OrderedDict()
+        self._dataset_scan_inflight: Dict[tuple[Any, ...], threading.Event] = {}
+        self._dataset_scan_cache_lock = threading.RLock()
+        self._dataset_scan_generation = 0
+        self._dataset_scan_cache_limit = 32
         self.jobs = RenderJobManager(self._render, max_workers=1)
+
+    def scan_dataset_sources(
+        self,
+        primary_path: str,
+        source_paths: Optional[list[str]] = None,
+        *,
+        gene: Optional[str] = None,
+        build: str = "hg38",
+        file_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+        refresh: bool = False,
+    ) -> DatasetScan:
+        """Scan roots once and share the result across previews and builds.
+
+        The browser first scans each imported source, then asks for viewport
+        previews and finally creates a session.  Those requests previously
+        reopened every BigWig/mcool and sampled every text file.  This bounded
+        cache, plus single-flight coordination for identical concurrent
+        requests, makes all later steps reuse the authoritative first scan.
+        """
+        roots = _dataset_source_paths(primary_path, source_paths)
+        if refresh:
+            self.invalidate_dataset_scan_cache(roots)
+        root_key = tuple(self._dataset_scan_root_key(path) for path in roots)
+        overrides_key = json.dumps(
+            file_overrides or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+
+        while True:
+            with self._dataset_scan_cache_lock:
+                generation = self._dataset_scan_generation
+                key = (
+                    generation,
+                    root_key,
+                    str(build or "hg38").strip().casefold(),
+                    overrides_key,
+                )
+                cached = self._dataset_scan_cache.get(key)
+                if cached is not None:
+                    self._dataset_scan_cache.move_to_end(key)
+                    return resolve_dataset_query(cached, self.references, gene, build)
+                pending = self._dataset_scan_inflight.get(key)
+                if pending is None:
+                    pending = threading.Event()
+                    self._dataset_scan_inflight[key] = pending
+                    owner = True
+                else:
+                    owner = False
+            if owner:
+                break
+            pending.wait()
+
+        try:
+            scan = _scan_dataset_sources(
+                roots[0],
+                roots[1:],
+                self.inspector,
+                self.references,
+                gene=None,
+                build=build,
+                file_overrides=file_overrides,
+            )
+        except Exception:
+            with self._dataset_scan_cache_lock:
+                self._dataset_scan_inflight.pop(key, None)
+                pending.set()
+            raise
+
+        with self._dataset_scan_cache_lock:
+            if generation == self._dataset_scan_generation:
+                self._dataset_scan_cache[key] = scan
+                self._dataset_scan_cache.move_to_end(key)
+                while len(self._dataset_scan_cache) > self._dataset_scan_cache_limit:
+                    self._dataset_scan_cache.popitem(last=False)
+            self._dataset_scan_inflight.pop(key, None)
+            pending.set()
+        return resolve_dataset_query(scan, self.references, gene, build)
+
+    def invalidate_dataset_scan_cache(self, roots: Optional[list[str]] = None) -> None:
+        """Invalidate scans after an explicit refresh or a completed upload."""
+        with self._dataset_scan_cache_lock:
+            self._dataset_scan_generation += 1
+            self._dataset_scan_cache.clear()
+        for root in roots or []:
+            self.inspector.invalidate_cache(root)
+
+    def _dataset_scan_root_key(self, raw_path: str) -> str:
+        candidate = self.inspector.platform_path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.project_root / candidate
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            candidate = candidate.absolute()
+        return str(candidate).replace("\\", "/").rstrip("/").casefold()
 
     def create(self, session_id: str, spec: Dict[str, Any], replace: bool = False) -> FigureSession:
         with self._lock:
@@ -345,7 +448,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "service": "cfizz-agent", "api_revision": 13}
+        return {"status": "ok", "service": "cfizz-agent", "api_revision": 14}
 
     @app.get("/api/planner")
     async def planner_status():
@@ -398,14 +501,14 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
     @app.post("/api/datasets/scan")
     async def scan_data_directory(body: DatasetScanBody):
         try:
-            scan = _scan_dataset_sources(
+            scan = await run_in_threadpool(
+                service.scan_dataset_sources,
                 body.path,
                 body.source_paths,
-                service.inspector,
-                service.references,
                 gene=body.gene,
                 build=body.reference_build,
                 file_overrides=body.file_overrides,
+                refresh=body.refresh,
             )
         except (OSError, PermissionError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -469,6 +572,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                         raise HTTPException(413, "上传文件超过 2 GiB 限制。")
                     handle.write(chunk)
             os.replace(temporary, destination)
+            service.invalidate_dataset_scan_cache([str(parent)])
         except HTTPException:
             temporary.unlink(missing_ok=True)
             raise
@@ -593,6 +697,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
             service.inspector.authorize_root(str(batch_root))
         except (OSError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
+        service.invalidate_dataset_scan_cache([str(batch_root)])
         return {
             "path": str(batch_root),
             "file_count": len(files),
@@ -603,14 +708,14 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
     @app.post("/api/sessions/from-dataset")
     async def create_from_dataset(body: DatasetSessionBody):
         try:
-            scan = _scan_dataset_sources(
+            scan = await run_in_threadpool(
+                service.scan_dataset_sources,
                 body.path,
                 body.source_paths,
-                service.inspector,
-                service.references,
                 gene=body.gene,
                 build=body.reference_build,
                 file_overrides=body.file_overrides,
+                refresh=body.refresh,
             )
             selected_paths = body.selected_paths
             requires_hic = _workflow_requires_hic(body.figure_type)
@@ -771,14 +876,14 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                 resolved = service.inspector.platform_path(source_path).expanduser()
                 if resolved.exists() and resolved.is_dir():
                     service.inspector.authorize_root(str(resolved))
-            scan = _scan_dataset_sources(
+            scan = await run_in_threadpool(
+                service.scan_dataset_sources,
                 body.path,
                 body.source_paths,
-                service.inspector,
-                service.references,
                 gene=body.gene,
                 build=body.reference_build,
                 file_overrides=body.file_overrides,
+                refresh=body.refresh,
             )
             selected_scan = select_dataset_files(scan, body.selected_paths)
             patch = build_track_patch(selected_scan, session.current_spec, service.inspector, {"signal", "intervals"})
@@ -1021,11 +1126,10 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         if (body.dataset_path or body.source_paths) and body.selected_paths:
             try:
                 primary_path = body.dataset_path or body.source_paths[0]
-                scan = _scan_dataset_sources(
+                scan = await run_in_threadpool(
+                    service.scan_dataset_sources,
                     primary_path,
                     body.source_paths,
-                    service.inspector,
-                    service.references,
                     gene=body.gene,
                     build=body.reference_build,
                     file_overrides=body.file_overrides,
@@ -2364,8 +2468,8 @@ def _chat_prepare_workflow(
         service, raw_root, list(request.get("explicit_paths") or []), figure_type,
     )
     service.inspector.authorize_root(str(root))
-    scan = scan_dataset(
-        str(root), service.inspector, service.references,
+    scan = service.scan_dataset_sources(
+        str(root),
         # A genomic interval is a viewport request, not a gene lookup.  Only
         # pass an actual gene symbol to the dataset scanner; otherwise a
         # string/tuple such as ("chr1", 0, 2_000_000) can be misinterpreted
@@ -2936,7 +3040,7 @@ def _directory_track_intent(
         return IntentResult("answer", f"没有找到你提供的目录：{path}。请检查路径是否完整。", planner="data:directory")
     try:
         service.inspector.authorize_root(str(platform_path))
-        scan = scan_dataset(str(platform_path), service.inspector, service.references)
+        scan = service.scan_dataset_sources(str(platform_path))
         requested_roles = {"signal"} if "bigwig" in compact or "big wig" in compact else {"signal", "intervals"}
         patch = build_track_patch(scan, session.current_spec, service.inspector, requested_roles)
     except (OSError, PermissionError, ValueError) as exc:

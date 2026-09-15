@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ from urllib.parse import quote
 
 import httpx
 
+import cfizz.agent.web as agent_web
 from cfizz.agent.adapter import CfizzRenderAdapter
 from cfizz.agent.intent import IntentResult
 from cfizz.agent.web import create_app
@@ -42,7 +44,7 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_health_and_workspace_page(self):
         health = (await self.client.get("/api/health")).json()
         self.assertEqual(health["status"], "ok")
-        self.assertEqual(health["api_revision"], 13)
+        self.assertEqual(health["api_revision"], 14)
         planner = (await self.client.get("/api/planner")).json()
         self.assertIn(planner["mode"], {"rules", "ai-assisted"})
         catalog = (await self.client.get("/api/planners")).json()
@@ -125,6 +127,9 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("选择后将自动补齐已导入的匹配文件", script.text)
         self.assertIn("function applyFigureZoom()", script.text)
         self.assertIn("function previewDatasetRegion", script.text)
+        self.assertIn("function beginDatasetAction", script.text)
+        self.assertIn("refresh:Boolean(options.refresh)", script.text)
+        self.assertIn("datasetPreviewController", script.text)
         self.assertIn("function openDialog", script.text)
         self.assertIn("function updateDatasetWorkspaceSummary", script.text)
         self.assertNotIn("if (!options.refresh) closeDialog('dataDialog')", script.text)
@@ -266,11 +271,56 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["missing"])
         self.assertTrue(any(item["id"] == "integrated" for item in payload["capabilities"]))
 
+    async def test_dataset_scan_is_reused_until_explicit_refresh(self):
+        with patch(
+            "cfizz.agent.web._scan_dataset_sources",
+            wraps=agent_web._scan_dataset_sources,
+        ) as scan_sources:
+            first = await self.client.post("/api/datasets/scan", json={"path": "demo/data"})
+            self.assertEqual(first.status_code, 200, first.text)
+
+            created = await self.client.post("/api/sessions/from-dataset", json={
+                "session_id": "cached_dataset_session",
+                "path": "demo/data",
+                "gene": "FOXJ1",
+                "render": False,
+            })
+            self.assertEqual(created.status_code, 200, created.text)
+            self.assertEqual(created.json()["spec"]["viewport"]["focus_label"], "FOXJ1")
+            self.assertEqual(scan_sources.call_count, 1)
+
+            refreshed = await self.client.post(
+                "/api/datasets/scan",
+                json={"path": "demo/data", "refresh": True},
+            )
+            self.assertEqual(refreshed.status_code, 200, refreshed.text)
+            self.assertEqual(scan_sources.call_count, 2)
+
+    async def test_concurrent_identical_scans_share_one_backend_scan(self):
+        original = agent_web._scan_dataset_sources
+
+        def delayed_scan(*args, **kwargs):
+            import time
+            time.sleep(0.05)
+            return original(*args, **kwargs)
+
+        with patch("cfizz.agent.web._scan_dataset_sources", side_effect=delayed_scan) as scan_sources:
+            first, second = await asyncio.gather(
+                self.client.post("/api/datasets/scan", json={"path": "demo/data"}),
+                self.client.post("/api/datasets/scan", json={"path": "demo/data"}),
+            )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(scan_sources.call_count, 1)
+
     async def test_upload_dataset_file_is_scoped_to_authorized_scan_directory(self):
         directory = Path(self.runtime.name) / "upload-data"
         directory.mkdir()
         authorized = await self.client.post("/api/datasets/authorize", json={"path": str(directory)})
         self.assertEqual(authorized.status_code, 200, authorized.text)
+        before = await self.client.post("/api/datasets/scan", json={"path": str(directory)})
+        self.assertEqual(before.status_code, 200, before.text)
+        self.assertEqual(before.json()["files"], [])
         response = await self.client.post(
             "/api/datasets/upload",
             content=b"##gff-version 3\n",
@@ -279,6 +329,9 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["filename"], "基因.gtf")
         self.assertEqual((directory / "基因.gtf").read_bytes(), b"##gff-version 3\n")
+        rescanned = await self.client.post("/api/datasets/scan", json={"path": str(directory)})
+        self.assertEqual(rescanned.status_code, 200, rescanned.text)
+        self.assertEqual(rescanned.json()["files"][0]["name"], "基因.gtf")
 
     async def test_local_dataset_upload_preserves_folder_structure_and_completes(self):
         session_id = "chat_upload_test"

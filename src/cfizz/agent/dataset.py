@@ -392,6 +392,47 @@ def scan_dataset(
     )
 
 
+def resolve_dataset_query(
+    scan: DatasetScan,
+    references: ReferenceRegistry,
+    gene: Optional[str] = None,
+    build: str = "hg38",
+) -> DatasetScan:
+    """Apply a gene or region query without rediscovering dataset files.
+
+    File inventory, type detection, and metadata inspection are independent of
+    the requested viewport.  Keeping that expensive work separate lets the web
+    UI preview a different gene/region from an existing scan immediately.
+    """
+    reference_files = [
+        item for item in scan.files
+        if item.role == "gene_annotation" and item.usable
+    ]
+    annotation_path = _select_annotation(reference_files, gene)
+    location = (
+        _resolve_query(gene, references, build, annotation_path, scan.chromosomes)
+        if gene else None
+    )
+    reference = references._build(build).to_dict()
+    if annotation_path:
+        reference["user_annotation"] = annotation_path
+    elif location and location.annotation_path:
+        reference["bundled_annotation"] = location.annotation_path
+
+    missing = [
+        message for message in scan.missing
+        if not message.startswith("未在当前 GTF 或内置参考中定位基因")
+    ]
+    if gene and location is None and not _parse_region_query(gene):
+        missing.append(f"未在当前 GTF 或内置参考中定位基因 {gene}")
+    return replace(
+        scan,
+        reference=reference,
+        gene=location.to_dict() if location else None,
+        missing=missing,
+    )
+
+
 def build_integrated_spec(
     scan: DatasetScan,
     session_id: str,
