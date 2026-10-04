@@ -11,7 +11,10 @@ import inspect
 import os
 from pathlib import Path, PurePosixPath
 import re
+import signal
 import shutil
+import subprocess
+import sys
 import threading
 import uuid
 from typing import Any, Dict, Literal, Optional
@@ -24,7 +27,6 @@ from starlette.concurrency import run_in_threadpool
 
 from cfizz import __version__
 
-from .adapter import CfizzRenderAdapter
 from .bundled import DEMO_DATA_ROOT, RESOURCE_ROOT, load_demo_spec
 from .companions import (
     companion_resolution,
@@ -53,11 +55,17 @@ from .figure_types import (
     FIGURE_TYPE_BY_ID,
     READY_FIGURE_TYPE_IDS,
     figure_type_catalog,
+    function_catalog,
     supports_integrated_tracks,
 )
 from .inspection import DataInspector
+from .insulation_windows import (
+    common_insulation_windows,
+    format_insulation_windows,
+    require_insulation_window,
+)
 from .intent import IntentResult, SimpleIntentInterpreter
-from .jobs import RenderJobManager
+from .jobs import RenderJobManager, RenderOutcome
 from .planner import build_planner_registry_from_env
 from .parameters import (
     ParameterCatalog,
@@ -132,9 +140,26 @@ class WorkflowBody(BaseModel):
     render: bool = True
 
 
+class ChatDatasetSelection(BaseModel):
+    """Browser-selected files used for chat workflow binding.
+
+    Paths remain local to the CFIZZ server and are never included in the
+    external model prompt.  The normal scanner, authorization boundary and
+    workflow contract validate them again before any render is prepared.
+    """
+
+    dataset_path: Optional[str] = Field(default=None, max_length=4096)
+    source_paths: list[str] = Field(default_factory=list, max_length=32)
+    selected_paths: list[str] = Field(default_factory=list, max_length=200)
+    reference_build: str = Field(default="hg38", max_length=80)
+    file_overrides: Dict[str, Dict[str, str]] = Field(default_factory=dict)
+
+
 class ChatBody(BaseModel):
     message: str = Field(min_length=1)
     provider: Optional[str] = None
+    workspace_context: Dict[str, Any] = Field(default_factory=dict)
+    dataset_selection: Optional[ChatDatasetSelection] = None
     confirm_scientific_change: bool = False
     render: bool = True
 
@@ -359,11 +384,185 @@ class WorkspaceService:
                 # error later; root restoration itself is best-effort.
                 continue
 
-    def _render(self, session_id: str, version_id: str, spec: Dict[str, Any]):
+    def _render(
+        self,
+        session_id: str,
+        version_id: str,
+        spec: Dict[str, Any],
+        *,
+        progress_callback=None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> RenderOutcome:
+        """Render one figure in an isolated, cancellable child process."""
+        cancel_event = cancel_event or threading.Event()
+        token = uuid.uuid4().hex
         output_dir = self.artifact_root / session_id / version_id
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        staging_dir = output_dir.parent / f".render-{token}"
+        task_dir = self.runtime_root / "render_jobs" / token
+        task_dir.mkdir(parents=True, exist_ok=True)
+        request_path = task_dir / "request.json"
+        result_path = task_dir / "result.json"
+        progress_path = task_dir / "progress.json"
+        log_path = task_dir / "worker.log"
         render_spec = deepcopy(spec)
         render_spec.setdefault("export", {})["formats"] = ["svg", "png", "pdf"]
-        return CfizzRenderAdapter(self.validator, str(output_dir)).render(render_spec)
+        request_path.write_text(
+            json.dumps(
+                {
+                    "spec": render_spec,
+                    "output_dir": str(staging_dir),
+                    "allowed_roots": [str(path) for path in self.inspector.allowed_roots],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        command = [
+            sys.executable,
+            "-m",
+            "cfizz.agent.render_worker",
+            str(request_path),
+            str(result_path),
+            str(progress_path),
+        ]
+        process_options: Dict[str, Any] = {}
+        if os.name == "nt":
+            process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            process_options["start_new_session"] = True
+        process: Optional[subprocess.Popen] = None
+        progress_mtime = -1
+        try:
+            if progress_callback:
+                progress_callback("starting_worker", 3)
+            with log_path.open("w", encoding="utf-8") as log_handle:
+                process = subprocess.Popen(
+                    command,
+                    cwd=str(self.project_root),
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    **process_options,
+                )
+                while process.poll() is None:
+                    if cancel_event.is_set():
+                        self._terminate_render_process(process)
+                        return RenderOutcome(False, [], None)
+                    try:
+                        current_mtime = progress_path.stat().st_mtime_ns
+                        if current_mtime != progress_mtime:
+                            progress_mtime = current_mtime
+                            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+                            if progress_callback:
+                                progress_callback(
+                                    str(progress.get("stage") or "reading_and_rendering"),
+                                    int(progress.get("progress") or 0),
+                                )
+                    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+                        pass
+                    cancel_event.wait(0.25)
+
+            if cancel_event.is_set():
+                return RenderOutcome(False, [], None)
+            if not result_path.exists():
+                detail = self._render_log_tail(log_path)
+                return RenderOutcome(
+                    False,
+                    [],
+                    f"绘图子进程异常退出（代码 {process.returncode}）。{detail}".strip(),
+                )
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            if not result.get("success"):
+                return RenderOutcome(False, [], str(result.get("error") or "绘图失败。"))
+
+            staged_artifacts = [Path(path).resolve() for path in result.get("artifacts", [])]
+            staging_root = staging_dir.resolve()
+            relative_artifacts: list[Path] = []
+            for artifact in staged_artifacts:
+                try:
+                    relative_artifacts.append(artifact.relative_to(staging_root))
+                except ValueError:
+                    return RenderOutcome(False, [], "绘图子进程返回了不在临时产物目录中的文件。")
+            if progress_callback:
+                progress_callback("publishing_artifacts", 98)
+            (staging_dir / "render_manifest.json").write_text(
+                json.dumps({
+                    "session_id": session_id,
+                    "version_id": version_id,
+                    "figure_type": spec.get("figure_type"),
+                    "entrypoint": result.get("entrypoint"),
+                    "source_labels": [
+                        source.get("sample") or source.get("label") or Path(str(source.get("path") or "")).name
+                        for source in spec.get("data_sources", []) if isinstance(source, dict)
+                    ],
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            self._publish_staged_render(staging_dir, output_dir, token)
+            artifacts = [str((output_dir / relative).resolve()) for relative in relative_artifacts]
+            return RenderOutcome(True, artifacts, None)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            if cancel_event.is_set():
+                return RenderOutcome(False, [], None)
+            return RenderOutcome(False, [], f"绘图任务失败：{exc}")
+        finally:
+            if process is not None and process.poll() is None:
+                self._terminate_render_process(process)
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+    @staticmethod
+    def _terminate_render_process(process: subprocess.Popen) -> None:
+        """Terminate the worker and any analysis subprocesses it created."""
+        if process.poll() is not None:
+            return
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=5,
+                )
+            else:
+                os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                if os.name == "nt":
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+    @staticmethod
+    def _render_log_tail(log_path: Path) -> str:
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return ""
+        return " ".join(lines[-3:])[-1000:]
+
+    @staticmethod
+    def _publish_staged_render(staging_dir: Path, output_dir: Path, token: str) -> None:
+        """Replace a version only after every staged artifact is complete."""
+        backup_dir = output_dir.parent / f".previous-{token}"
+        had_previous = output_dir.exists()
+        if had_previous:
+            output_dir.replace(backup_dir)
+        try:
+            staging_dir.replace(output_dir)
+        except Exception:
+            if had_previous and backup_dir.exists() and not output_dir.exists():
+                backup_dir.replace(output_dir)
+            raise
+        finally:
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
 
     def artifact_url(self, path: str) -> str:
         resolved = Path(path).resolve()
@@ -383,13 +582,41 @@ class WorkspaceService:
             "can_redo": session.can_redo,
         }
 
+    def render_evidence(self, session: FigureSession) -> Dict[str, Any]:
+        """Describe the actual PNG and latest job for the current revision."""
+        version_id = session.current.version_id
+        artifact_dir = self.artifact_root / session.session_id / version_id
+        png_exists = artifact_dir.is_dir() and any(artifact_dir.rglob("*.png"))
+        manifest_path = artifact_dir / "render_manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            manifest = {}
+        if not isinstance(manifest, dict):
+            manifest = {}
+        source_labels = manifest.get("source_labels")
+        if not isinstance(source_labels, list):
+            source_labels = []
+        job = self.jobs.latest_for_session(session.session_id, version_id)
+        return {
+            "version_id": version_id,
+            "figure_type": session.current_spec.get("figure_type"),
+            "png_exists": bool(png_exists),
+            "entrypoint": manifest.get("entrypoint"),
+            "source_labels": source_labels,
+            "job_status": job.status if job else None,
+            "job_error": job.error if job else None,
+        }
+
     def remember_dialogue(self, session_id: str, user_message: str, assistant_reply: str) -> None:
         history = self.dialogue_history.setdefault(session_id, [])
         history.extend([
             {"role": "user", "content": user_message},
             {"role": "assistant", "content": assistant_reply},
         ])
-        del history[:-12]
+        # Keep enough turns for follow-ups such as “use both of those files”
+        # without sending an unbounded transcript to an external planner.
+        del history[:-40]
 
 
 def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] = None) -> FastAPI:
@@ -448,7 +675,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "service": "cfizz-agent", "api_revision": 14}
+        return {"status": "ok", "service": "cfizz-agent", "api_revision": 18}
 
     @app.get("/api/planner")
     async def planner_status():
@@ -483,7 +710,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
 
     @app.get("/api/figure-types")
     async def figure_types():
-        return {"figure_types": figure_type_catalog()}
+        return {"figure_types": figure_type_catalog(), "functions": function_catalog()}
 
     @app.get("/api/visualization-parameters")
     async def visualization_parameters(figure_type: Optional[str] = None):
@@ -517,7 +744,8 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
     @app.post("/api/datasets/authorize")
     async def authorize_data_directory(body: DatasetAuthorizeBody):
         try:
-            authorized = service.inspector.authorize_root(body.path)
+            requested = service.inspector.platform_path(body.path).expanduser()
+            authorized = service.inspector.authorize_root(str(requested.parent if requested.is_file() else requested))
         except (OSError, ValueError) as exc:
             raise HTTPException(422, str(exc)) from exc
         return {"authorized_root": str(authorized), "message": "目录已授权给当前服务进程，可重新扫描。"}
@@ -985,10 +1213,9 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         resolution = service.validator.choose_resolution(end - start, resolutions)
         companion = None
         companion_kind = None
-        if body.figure_type in {"tad_insulation", "tad_insulation_track", "tad_boundary_square", "compartment", "loop_heatmap", "loop_apa"}:
+        if body.figure_type in {"tad_insulation", "compartment", "loop_heatmap", "loop_apa"}:
             companion_kind = (
-                "insulation" if body.figure_type in {"tad_insulation", "tad_insulation_track"}
-                else "boundaries" if body.figure_type == "tad_boundary_square"
+                "insulation" if body.figure_type == "tad_insulation"
                 else "compartment" if body.figure_type == "compartment"
                 else "loops"
             )
@@ -996,7 +1223,6 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
             if companion is None:
                 requirement = (
                     "CFIZZ insulation TSV" if companion_kind == "insulation"
-                    else "CFIZZ boundaries TSV" if companion_kind == "boundaries"
                     else "预计算 E1 TSV" if companion_kind == "compartment"
                     else "Loop BEDPE/TSV"
                 )
@@ -1013,20 +1239,17 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
             spec["data_sources"].append({
                 "id": (
                     "insulation_result" if companion_kind == "insulation"
-                    else "tad_boundaries" if companion_kind == "boundaries"
                     else "compartment_result" if companion_kind == "compartment"
                     else "loop_calls"
                 ),
                 "type": (
                     "insulation_tsv" if companion_kind == "insulation"
-                    else "tad_tsv" if companion_kind == "boundaries"
                     else "compartment_tsv" if companion_kind == "compartment"
                     else "loop_tsv"
                 ),
                 "path": str(companion.path),
                 "label": (
                     "Insulation" if companion_kind == "insulation"
-                    else "TAD boundaries" if companion_kind == "boundaries"
                     else "E1" if companion_kind == "compartment"
                     else "Loops"
                 ),
@@ -1052,7 +1275,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
             "session_id": session.session_id,
             "version_id": session.current.version_id,
             "figure_type": session.current_spec.get("figure_type"),
-            "parameters": ParameterCatalog(session.current_spec).model_catalog(),
+            "parameters": _parameter_catalog(service, session.current_spec).model_catalog(),
         }
 
     @app.post("/api/sessions/{session_id}/parameters")
@@ -1060,7 +1283,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         """Safely update one catalogued parameter and optionally re-render."""
         session = _session_or_404(service, session_id)
         try:
-            operation, scientific = ParameterCatalog(session.current_spec).compile(
+            operation, scientific = _parameter_catalog(service, session.current_spec).compile(
                 ParameterEdit(
                     target_kind=body.target_kind,
                     target_id=body.target_id,
@@ -1082,6 +1305,9 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                 "summary": f"更新可视化参数 {body.parameter}",
                 "operations": [operation],
             }
+            window_issue = _check_insulation_window_patch(service, session.current_spec, patch)
+            if window_issue:
+                raise ValueError(window_issue)
             with service._lock:
                 revision = session.apply_patch(patch)
                 service.save(session)
@@ -1093,7 +1319,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         return {
             **service.session_payload(session),
             "revision": revision.to_dict(),
-            "parameters": ParameterCatalog(session.current_spec).model_catalog(),
+            "parameters": _parameter_catalog(service, session.current_spec).model_catalog(),
             "job": job,
         }
 
@@ -1102,6 +1328,9 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         session = _session_or_404(service, session_id)
         patch = _augment_compartment_patch(body.patch, session.current_spec, service.inspector)
         try:
+            window_issue = _check_insulation_window_patch(service, session.current_spec, patch)
+            if window_issue:
+                raise ValueError(window_issue)
             with service._lock:
                 revision = session.apply_patch(patch)
                 service.save(session)
@@ -1196,6 +1425,14 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         if resolved.action != "patch" or not resolved.patch:
             raise HTTPException(422, resolved.reply)
         try:
+            if body.figure_type in {"tad_multi", "tad_diff_region"} and "window_size" in body.options:
+                window_spec = working_session.current_spec
+                window_spec["figure_type"] = body.figure_type
+                window_spec["workflow_source_ids"] = workflow_source_ids
+                requested = body.options["window_size"]
+                if not isinstance(requested, int) or isinstance(requested, bool):
+                    raise ValueError("TAD 窗口大小必须是整数 bp。")
+                require_insulation_window(_active_insulation_paths(service, window_spec), requested)
             with service._lock:
                 patch = _augment_compartment_patch(resolved.patch, working_session.current_spec, service.inspector)
                 if working_session is session:
@@ -1218,13 +1455,42 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         history = service.dialogue_history.get(session_id, [])
         confirmation = _confirmation_text(body.message)
         cancellation = _cancellation_text(body.message)
-        pending = service.pending_actions.pop(session_id, None) if (confirmation or cancellation) else None
+        stored_pending = service.pending_actions.get(session_id)
+        pending = None
         intent = None
-        # A chat workflow is a two-step operation: first prepare and explain
-        # the exact CFIZZ inputs, then mutate/render only after the user says
-        # “确认”.  This keeps conversational drawing consistent with the
-        # right-hand workflow picker and avoids a hidden “guess all files” run.
-        if pending is not None and pending.get("kind") == "workflow":
+        if isinstance(stored_pending, dict) and stored_pending.get("kind") == "workflow_choice":
+            if cancellation:
+                service.pending_actions.pop(session_id, None)
+                intent = IntentResult("answer", "已取消这次绘图选择，没有修改当前图。", planner="chat:workflow")
+            else:
+                chosen_path = _chat_resolve_workflow_choice(stored_pending, body.message)
+                if chosen_path:
+                    service.pending_actions.pop(session_id, None)
+                    choice_request = deepcopy(stored_pending.get("request") or {})
+                    choice_request["explicit_paths"] = [chosen_path]
+                    intent = _chat_workflow_confirmation(service, session, choice_request)
+                else:
+                    labels = "、".join(
+                        str(option.get("sample") or option.get("name") or "")
+                        for option in stored_pending.get("options") or []
+                    )
+                    intent = IntentResult(
+                        "clarify",
+                        f"请从以下样本中选择一个：{labels}。可以直接回复样本名、完整文件名，或“第一个/第二个”。",
+                        planner="chat:workflow",
+                    )
+        elif confirmation or cancellation:
+            pending = service.pending_actions.pop(session_id, None)
+        # Explicit drawing requests start immediately.  The only conversational
+        # pause is a real one-of-many input choice; once the user names that
+        # sample/file, the workflow is applied and rendered in the same turn.
+        if intent is None and not confirmation and not cancellation:
+            intent = _insulation_window_intent(service, session.current_spec, body.message)
+        if intent is None and not confirmation and not cancellation:
+            intent = _render_diagnostic_intent(service, session, body.message, body.workspace_context)
+        if intent is None and not confirmation and not cancellation:
+            intent = _integrated_overlay_intent(service, session, body.message, body.workspace_context)
+        if intent is None and pending is not None and pending.get("kind") == "workflow":
             if cancellation:
                 intent = IntentResult("answer", "已取消这次 CFIZZ 工作流，没有修改当前图。", planner="chat:workflow")
             elif confirmation:
@@ -1234,10 +1500,22 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                     {"workflow_pending": pending},
                     planner="chat:workflow",
                 )
-        elif not confirmation and not cancellation:
-            request = _chat_workflow_request(body.message, history, session)
-            if request is not None:
-                intent = _chat_workflow_confirmation(service, session, request)
+        elif intent is None and not confirmation and not cancellation:
+            removed_figure = SimpleIntentInterpreter._parse_removed_figure_type(body.message)
+            if removed_figure is not None:
+                label, alternative = removed_figure
+                intent = IntentResult(
+                    "clarify",
+                    f"“{label}”已从 CFIZZ Agent 的可生成图类型中取消。{alternative}",
+                    planner="catalog:removed-figure",
+                )
+            else:
+                request = _chat_workflow_request(
+                    body.message, history, session,
+                    workspace_selection=body.dataset_selection.model_dump() if body.dataset_selection else None,
+                )
+                if request is not None:
+                    intent = _chat_workflow_confirmation(service, session, request)
 
         if intent is None:
             intent = _hic_comparison_intent(service, session, body.message, history=history)
@@ -1279,12 +1557,19 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                 service.pending_actions.pop(session_id, None)
             async_interpret = getattr(planner, "interpret_async", None)
             history = service.dialogue_history.get(session_id, [])
+            planning_spec = _planning_spec_with_insulation_windows(service, session.current_spec)
+            planner_workspace = deepcopy(body.workspace_context)
+            planner_workspace["render_evidence"] = service.render_evidence(session)
             if async_interpret is not None:
                 kwargs = {"history": history} if _method_accepts_history(async_interpret) else {}
-                intent = await async_interpret(body.message, session.current_spec, **kwargs)
+                if _method_accepts_workspace_context(async_interpret):
+                    kwargs["workspace_context"] = planner_workspace
+                intent = await async_interpret(body.message, planning_spec, **kwargs)
             else:
                 kwargs = {"history": history} if _method_accepts_history(planner.interpret) else {}
-                intent = planner.interpret(body.message, session.current_spec, **kwargs)
+                if _method_accepts_workspace_context(planner.interpret):
+                    kwargs["workspace_context"] = planner_workspace
+                intent = planner.interpret(body.message, planning_spec, **kwargs)
 
         # The model may unnecessarily turn an explicit, fully specified gene
         # drawing command into a multiple-choice question.  Keep AI-first
@@ -1295,7 +1580,7 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         # user confirms.  Do not let the later gene/reference convenience
         # fallbacks reinterpret words such as “Hi-C” in that preview request
         # and turn it into an immediate annotation patch.
-        if intent.action == "clarify" and intent.planner != "chat:workflow":
+        if intent.action == "clarify" and intent.planner not in {"chat:workflow", "insulation:columns"}:
             local_gene_intent = _region_gene_annotation_intent(service, session, body.message)
             if local_gene_intent is None:
                 local_gene_intent = _gene_annotation_intent(service, session, body.message)
@@ -1329,13 +1614,14 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
         if intent.action == "workflow":
             ai_workflow_type = str((intent.patch or {}).get("workflow_request", {}).get("figure_type") or "")
             explicit_paths, dataset_path = _chat_extract_paths(body.message)
-            if ai_workflow_type and (explicit_paths or dataset_path):
+            if ai_workflow_type and (explicit_paths or dataset_path or body.dataset_selection is not None):
                 chat_request = _chat_workflow_request(
                     body.message,
                     history,
                     session,
                     figure_type_override=ai_workflow_type,
                     allow_without_draw_words=True,
+                    workspace_selection=body.dataset_selection.model_dump() if body.dataset_selection else None,
                 )
                 if chat_request is not None:
                     intent = _chat_workflow_confirmation(service, session, chat_request)
@@ -1365,6 +1651,10 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
             resolution_issue = _check_resolution_patch(service, session, intent.patch)
             if resolution_issue is not None:
                 intent = IntentResult("clarify", resolution_issue, planner=f"{intent.planner}:resolution-check")
+            else:
+                window_issue = _check_insulation_window_patch(service, session.current_spec, intent.patch)
+                if window_issue:
+                    intent = IntentResult("clarify", window_issue, planner=f"{intent.planner}:insulation-window-check")
         if intent.action in {"clarify", "answer"}:
             service.remember_dialogue(session_id, body.message, intent.reply)
             return {"intent": intent.to_dict(), **service.session_payload(session), "job": None}
@@ -1445,6 +1735,16 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
     async def get_job(job_id: str):
         try:
             job = service.jobs.get(job_id)
+        except KeyError as exc:
+            raise HTTPException(404, "找不到渲染任务。") from exc
+        payload = job.to_dict()
+        payload["artifact_urls"] = [service.artifact_url(path) for path in job.artifacts]
+        return payload
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    async def cancel_job(job_id: str):
+        try:
+            job = service.jobs.cancel(job_id)
         except KeyError as exc:
             raise HTTPException(404, "找不到渲染任务。") from exc
         payload = job.to_dict()
@@ -1632,10 +1932,300 @@ def _method_accepts_history(method: Any) -> bool:
     return any(parameter.name == "history" or parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters)
 
 
+def _method_accepts_workspace_context(method: Any) -> bool:
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.name == "workspace_context" or parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+
+
 def _is_unhelpful_ai_reply(reply: Any) -> bool:
     """Recognise transport-looking text accidentally returned as an answer."""
     compact = re.sub(r"\s+", " ", str(reply or "")).strip().lower()
     return compact in {"not found", "404", "404 not found", "error", "internal server error"}
+
+
+_INSULATION_WINDOW_FIGURES = {"tad_insulation", "tad_multi", "tad_diff_region", "tracks_integrated"}
+
+
+def _render_diagnostic_intent(
+    service: WorkspaceService,
+    session: FigureSession,
+    message: str,
+    workspace_context: Dict[str, Any],
+) -> Optional[IntentResult]:
+    """Answer image/result disputes from render evidence, not a model guess."""
+    compact = re.sub(r"\s+", "", message).casefold()
+    if not re.search(r"没画出来|没有画出来|画不出来|没生成|没有生成|图.*不对|图.*不一致|图.*不是|不是.{0,16}(?:图|结果)|你再看看|看错了|画的是什么|画出来了吗", compact):
+        return None
+    evidence = service.render_evidence(session)
+    figure_type = str(evidence["figure_type"] or "")
+    item = FIGURE_TYPE_BY_ID.get(figure_type) or {}
+    label = str(item.get("label") or figure_type or "未知图形")
+    version_id = str(evidence["version_id"])
+    preview = workspace_context.get("displayed_preview") if isinstance(workspace_context, dict) else None
+    if not isinstance(preview, dict):
+        preview = {}
+    preview_version = str(preview.get("version_id") or "")
+    if not re.fullmatch(r"v\d{4,8}", preview_version):
+        preview_version = ""
+    preview_session = str(preview.get("session_id") or "")[:120]
+    stale_preview = bool(preview_version) and (
+        preview_session != session.session_id or preview_version != version_id
+    )
+    parts = []
+    if stale_preview:
+        prior_label = ""
+        if preview_session == session.session_id:
+            prior_revision = next((
+                revision for revision in session.to_dict().get("revisions", [])
+                if revision.get("version_id") == preview_version
+            ), None)
+            if prior_revision:
+                prior_type = str((prior_revision.get("spec") or {}).get("figure_type") or "")
+                prior_item = FIGURE_TYPE_BY_ID.get(prior_type) or {}
+                prior_label = f"的“{prior_item.get('label') or prior_type}”"
+        parts.append(f"你说得对：画布中的 PNG 来自此前的 {preview_version}{prior_label}，当前配置是 {version_id} 的“{label}”。我之前把配置当成了实际画面，判断有误。")
+        if not evidence["png_exists"]:
+            parts.append("当前尚无该版本成功保存的 PNG，不能说新图已经画出来。")
+        else:
+            parts.append("当前版本已有 PNG，但浏览器展示的仍是旧版本预览；请刷新画布或页面。")
+    elif evidence["png_exists"]:
+        parts.append(f"当前 {version_id} 已保存“{label}”的 PNG；我只能核对任务和文件，不能仅凭配置判断 PNG 的具体画面内容。")
+    else:
+        parts.append(f"当前 {version_id} 配置为“{label}”，但尚无该版本成功保存的 PNG，所以不能说它已经画出来。")
+    if evidence["png_exists"] and evidence.get("entrypoint"):
+        names = [str(value) for value in evidence.get("source_labels", [])[:4] if value]
+        inputs = f"；输入：{'、'.join(names)}" if names else ""
+        parts.append(f"本版渲染记录调用了 {evidence['entrypoint']}{inputs}。")
+    status = evidence["job_status"]
+    if status in {"queued", "running", "cancelling"}:
+        parts.append({"queued": "绘图任务仍在排队。", "running": "绘图任务仍在运行。", "cancelling": "绘图任务正在取消。"}[status])
+    elif status == "failed":
+        parts.append(f"最近一次绘图失败：{str(evidence['job_error'] or '服务端未提供具体错误')[:500]}")
+    elif status == "cancelled":
+        parts.append("最近一次绘图已取消。")
+    elif status == "succeeded" and not evidence["png_exists"]:
+        parts.append("任务记录为成功，但 PNG 文件已不存在，需要重新生成并检查产物。")
+    if stale_preview:
+        parts.append("请以新版本任务完成后更新的画布为准；旧预览不应被当作新图。")
+    return IntentResult("answer", " ".join(parts), planner="render:verified")
+
+
+def _integrated_overlay_intent(
+    service: WorkspaceService,
+    session: FigureSession,
+    message: str,
+    workspace_context: Dict[str, Any],
+) -> Optional[IntentResult]:
+    """Plan heatmap overlays from the actual renderer inputs and inspected files."""
+    compact = re.sub(r"\s+", "", message).casefold()
+    if SimpleIntentInterpreter._parse_removed_figure_type(compact) is not None:
+        return None
+    if re.search(r"画|绘制|生成|plot|draw", compact) and not any(
+        word in compact for word in ("当前", "这个图", "现在这个模式", "叠加", "添加", "加上")
+    ):
+        return None
+    want_loops = "loop" in compact or "环标" in compact
+    want_tad = "tad" in compact or "边界标" in compact or "绝缘" in compact
+    if not (want_loops or want_tad):
+        return None
+    if not any(word in compact for word in ("热图", "当前图", "这个图", "现在这个模式", "叠加", "加上", "添加", "标注")):
+        return None
+    spec = session.current_spec
+    item = FIGURE_TYPE_BY_ID.get(str(spec.get("figure_type"))) or {}
+    function_inputs = item.get("function_inputs") or {}
+    supported = function_inputs.get("hic_overlays") or {}
+    if not supported:
+        return None
+    requested = [role for role, wanted in (("loops", want_loops), ("insulation", want_tad)) if wanted]
+    question = bool(re.search(r"能否|能不能|可以|能在|支持吗|是否|为什么|为何|怎么|画不出来|吗|\?|？", message))
+    hics = [
+        layer for panel in spec.get("panels", []) for layer in panel.get("layers", [])
+        if layer.get("kind") == "hic" and layer.get("visible", True)
+    ]
+    sources = {source.get("id"): source for source in spec.get("data_sources", [])}
+    details = []
+    operations = []
+    missing = []
+    for role in requested:
+        key = "loops_path" if role == "loops" else "insulation_path"
+        label = "Loop" if role == "loops" else "TAD"
+        candidates = [source for source in sources.values() if source.get("role") == role]
+        already = all((layer.get("style") or {}).get(key) for layer in hics) if hics else False
+        if already:
+            details.append(f"{label} 已绑定")
+            continue
+        if len(hics) != 1 or len(candidates) != 1:
+            if not candidates:
+                imported = [
+                    str(file.get("name")) for file in (workspace_context.get("files") or [])
+                    if isinstance(file, dict) and file.get("role") == role and file.get("name")
+                ]
+                if imported:
+                    missing.append(f"{label} 文件已导入（{'、'.join(imported[:3])}），请在数据面板选中并应用")
+                else:
+                    missing.append(f"需要一份对应样本的 {'无表头 BEDPE 六列坐标文件' if role == 'loops' else '含绝缘分数和边界窗口列的 insulation TSV'}")
+            else:
+                missing.append(f"{label} 有 {len(candidates)} 个候选文件，请明确指定每个 Hi-C 样本对应哪一份")
+            continue
+        source = candidates[0]
+        report = service.inspector.inspect(source["path"], source.get("type"))
+        name = Path(source["path"]).name
+        if not report.usable:
+            missing.append(f"{name} 无法读取：{report.error}")
+            continue
+        if role == "loops":
+            if report.metadata.get("columns") or not report.metadata.get("bedpe_coordinate_rows"):
+                missing.append(f"{name} 没有可读取的无表头 BEDPE 六列坐标")
+                continue
+            details.append(f"Loop：{name}，检测到 BEDPE 坐标")
+        else:
+            windows = common_insulation_windows((report.path,))
+            if not windows:
+                missing.append(f"{name} 缺少同一窗口的 insulation score 与 is_boundary 列")
+                continue
+            details.append(f"TAD：{name}，可用窗口 {format_insulation_windows(windows)}")
+            for layer in hics:
+                current_window = (layer.get("style") or {}).get("window_size")
+                chosen_window = current_window if current_window in windows else (100_000 if 100_000 in windows else windows[0])
+                operations.append({"op": "update", "target_kind": "layer", "target_id": layer["id"], "field": "style.window_size", "value": chosen_window})
+        for layer in hics:
+            operations.append({"op": "update", "target_kind": "layer", "target_id": layer["id"], "field": f"style.{key}", "value": report.path})
+    prefix = "可以在当前 Hi-C 热图上叠加 Loop 和 TAD，同时保留现有轨道。" if len(requested) == 2 else "当前整合绘图函数支持在 Hi-C 热图上叠加该标注，并保留现有轨道。"
+    explanation = " ".join([prefix, "；".join(details) + "。" if details else "", "；".join(missing) + "。" if missing else ""]).strip()
+    if question or missing or not operations:
+        return IntentResult("answer" if question or not missing else "clarify", explanation, planner="renderer:input-capabilities")
+    return IntentResult(
+        "patch", explanation + "将按这些已检查的文件重新绘图。",
+        {"summary": "为当前 Hi-C 热图叠加标注", "operations": operations},
+        planner="renderer:input-capabilities",
+    )
+
+
+def _active_insulation_paths(service: WorkspaceService, spec: Dict[str, Any]) -> tuple[str, ...]:
+    if spec.get("figure_type") not in _INSULATION_WINDOW_FIGURES:
+        return ()
+    selected = set(spec.get("workflow_source_ids") or [])
+    sources = [
+        source for source in spec.get("data_sources", [])
+        if isinstance(source, dict) and (not selected or source.get("id") in selected)
+    ]
+    paths = [source["path"] for source in sources if source.get("type") == "insulation_tsv" and source.get("path")]
+    for panel in spec.get("panels", []):
+        for layer in panel.get("layers", []):
+            path = (layer.get("style") or {}).get("insulation_path")
+            if path:
+                paths.append(path)
+    if not paths and spec.get("figure_type") == "tad_insulation":
+        for source in sources:
+            if source.get("type") in {"cool", "mcool"}:
+                companion = discover_companion(service.inspector.resolve_path(source["path"]), "insulation")
+                if companion:
+                    paths.append(str(companion.path))
+    return tuple(dict.fromkeys(str(service.inspector.resolve_path(path)) for path in paths))
+
+
+def _insulation_window_options(service: WorkspaceService, spec: Dict[str, Any]) -> Optional[tuple[int, ...]]:
+    if spec.get("figure_type") not in _INSULATION_WINDOW_FIGURES:
+        return None
+    paths = _active_insulation_paths(service, spec)
+    if not paths and spec.get("figure_type") == "tracks_integrated":
+        return None
+    return common_insulation_windows(paths)
+
+
+def _parameter_catalog(service: WorkspaceService, spec: Dict[str, Any]) -> ParameterCatalog:
+    return ParameterCatalog(spec, insulation_windows=_insulation_window_options(service, spec))
+
+
+def _planning_spec_with_insulation_windows(service: WorkspaceService, spec: Dict[str, Any]) -> Dict[str, Any]:
+    windows = _insulation_window_options(service, spec)
+    planning_spec = deepcopy(spec)
+    if windows is not None:
+        planning_spec["_insulation_window_options"] = windows
+    inspections = {}
+    for source in spec.get("data_sources", [])[:80]:
+        if not isinstance(source, dict) or not source.get("id") or not source.get("path"):
+            continue
+        report = service.inspector.inspect(source["path"], source.get("type"))
+        metadata = report.metadata
+        inspections[source["id"]] = {
+            "usable": report.usable,
+            "columns": list(metadata.get("columns") or [])[:40],
+            "chromosomes": list(metadata.get("chromosomes") or [])[:30],
+            "bin_size": metadata.get("bin_size"),
+            "coordinate_rows": metadata.get("coordinate_rows"),
+            "bedpe_coordinate_rows": metadata.get("bedpe_coordinate_rows"),
+            "insulation_windows": list(common_insulation_windows((report.path,))) if report.usable and source.get("role") == "insulation" else [],
+            "error": None if report.usable else "文件无法读取或解析",
+        }
+    planning_spec["_source_inspections"] = inspections
+    return planning_spec
+
+
+def _check_insulation_window_patch(service: WorkspaceService, spec: Dict[str, Any], patch: Any) -> Optional[str]:
+    if not isinstance(patch, dict):
+        return None
+    requested = []
+    new_paths = []
+    for operation in patch.get("operations", []):
+        if not isinstance(operation, dict) or operation.get("op") != "update":
+            continue
+        field = operation.get("field")
+        value = operation.get("value")
+        if field in {"style.window_size", "workflow_options.window_size"}:
+            requested.append(value)
+        elif field == "style.insulation_path" and isinstance(value, str):
+            new_paths.append(value)
+        elif field in {"style", "workflow_options"} and isinstance(value, dict) and "window_size" in value:
+            requested.append(value["window_size"])
+    if not requested:
+        return None
+    paths = tuple(dict.fromkeys((*_active_insulation_paths(service, spec), *new_paths)))
+    for value in requested:
+        if isinstance(value, int) and not isinstance(value, bool):
+            try:
+                require_insulation_window(paths, value)
+            except (OSError, ValueError) as exc:
+                return str(exc)
+    return None
+
+
+def _insulation_window_intent(service: WorkspaceService, spec: Dict[str, Any], message: str) -> Optional[IntentResult]:
+    if spec.get("figure_type") not in _INSULATION_WINDOW_FIGURES:
+        return None
+    if not re.search(r"窗口|window|insulation", message, re.I):
+        return None
+    windows = _insulation_window_options(service, spec)
+    if windows is None:
+        return None
+    if not windows:
+        return IntentResult("clarify", "当前未绑定可用的 insulation 文件，或所选文件没有共同的 insulation score 和 is_boundary 窗口列。", planner="insulation:columns")
+    match = re.search(r"(?<!\d)(\d+(?:\.\d+)?)\s*(kb|mb|bp)(?![a-z])", message, re.I)
+    if match:
+        scale = {"bp": 1, "kb": 1_000, "mb": 1_000_000}[match.group(2).lower()]
+        requested = int(float(match.group(1)) * scale)
+        if requested not in windows:
+            try:
+                require_insulation_window(_active_insulation_paths(service, spec), requested)
+            except ValueError as exc:
+                return IntentResult("clarify", str(exc), planner="insulation:columns")
+        return None
+    current = (spec.get("workflow_options") or {}).get("window_size")
+    if current is None:
+        current = next((
+            (layer.get("style") or {}).get("window_size")
+            for panel in spec.get("panels", []) for layer in panel.get("layers", [])
+            if (layer.get("style") or {}).get("window_size") is not None
+        ), 100_000 if 100_000 in windows else windows[0])
+    reply = (
+        f"当前 TAD 窗口为 {format_insulation_windows((int(current),))}；"
+        f"所选 insulation 文件可用窗口：{format_insulation_windows(windows)}。"
+        "只能切换到文件中已有的窗口；其他窗口需要先重新计算 insulation。"
+    )
+    return IntentResult("answer", reply, planner="insulation:columns")
 
 
 def _check_resolution_patch(service: WorkspaceService, session: FigureSession, patch: Any) -> Optional[str]:
@@ -1741,6 +2331,18 @@ def _selected_feature_paths(spec: Dict[str, Any], kind: str, inspector: DataInsp
     return paths
 
 
+def _feature_grid_resolution(path: str, inspector: DataInspector) -> Optional[int]:
+    """Read a result table's grid from its contents, then its filename."""
+    metadata: Dict[str, Any] = {}
+    try:
+        inspected = inspector.inspect(path, "compartment_tsv")
+        if inspected.usable:
+            metadata = inspected.metadata
+    except (OSError, PermissionError, ValueError):
+        metadata = {}
+    return companion_resolution(path, metadata)
+
+
 def _workflow_requires_hic(figure_type: str) -> bool:
     """Return whether the catalogue contract requires a Hi-C matrix.
 
@@ -1807,6 +2409,8 @@ def _chat_workflow_type(message: str) -> Optional[str]:
     requests that are too ambiguous for these aliases.
     """
     text = str(message or "").casefold()
+    if SimpleIntentInterpreter._parse_removed_figure_type(text) is not None:
+        return None
     explicit = SimpleIntentInterpreter._parse_explicit_workflow(text)
     if explicit:
         # The intent parser returns ``(figure_id, label)``.  Chat requests
@@ -1834,8 +2438,6 @@ def _chat_workflow_type(message: str) -> Optional[str]:
             return "compartment_diff_region"
         if any(token in text for token in ("saddle", "鞍形", "鞍")):
             return "compartment_saddle"
-        if any(token in text for token in ("e1", "特征向量", "eigenvector")):
-            return "compartment_eigenvector"
         if multi:
             return "compartment_multi"
         return "compartment"
@@ -1851,8 +2453,6 @@ def _chat_workflow_type(message: str) -> Optional[str]:
             return "tad_boundary_pileup"
         if multi:
             return "tad_multi"
-        if any(token in text for token in ("边界", "boundary", "方形", "square")) and "绝缘" not in text and "insulation" not in text:
-            return "tad_boundary_square"
         return "tad_insulation"
 
     if "loop" in text or "环" in text:
@@ -1888,8 +2488,6 @@ def _chat_workflow_type(message: str) -> Optional[str]:
             return "hic_multi"
         if any(token in text for token in ("方形", "square")):
             return "hic_square"
-        if any(token in text for token in ("o/e", "oe", "observed/expected")):
-            return "hic_oe"
         return "hic_triangle"
     return None
 
@@ -1965,17 +2563,43 @@ def _chat_workflow_request(
     *,
     figure_type_override: Optional[str] = None,
     allow_without_draw_words: bool = False,
+    workspace_selection: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Parse a chat-only workflow request before the general AI intent path."""
     figure_type = figure_type_override or _chat_workflow_type(message)
     explicit_paths, directory = _chat_extract_paths(message)
     compact = re.sub(r"\s+", "", str(message or "")).casefold()
     draw_words = ("画", "绘制", "生成", "可视化", "出图", "plot", "draw", "visualiz", "workflow")
+    # A short answer such as “TAD 图吧” or “就选三角 Hi-C 热图” is an
+    # explicit catalogue choice even though it does not repeat the verb
+    # “生成”.  Previously it fell through to the language model, which could
+    # then bind stale sources from the current figure instead of the user's
+    # analysis scope.
+    choice_words = ("吧", "就这个", "就它", "选这个", "用这个", "要这个", "来一个", "来张")
+    explicit_figure_choice = any(token in compact for token in choice_words)
     if figure_type is None or (
         not allow_without_draw_words
-        and not (any(token in compact for token in draw_words) or "figure_type=" in compact)
+        and not (
+            any(token in compact for token in draw_words)
+            or explicit_figure_choice
+            or "figure_type=" in compact
+        )
     ):
         return None
+
+    # The persistent data browser is the most precise source of pronouns such
+    # as “这两个” because it records the files the user has actually checked.
+    # Keep paths out of the model prompt, but bind them locally here.
+    selection = workspace_selection if isinstance(workspace_selection, dict) else {}
+    selected_paths = [value.strip() for value in selection.get("selected_paths", []) if isinstance(value, str) and value.strip()]
+    source_paths = [value.strip() for value in selection.get("source_paths", []) if isinstance(value, str) and value.strip()]
+    if directory is None and not explicit_paths and selected_paths:
+        # Browser-selected paths form a candidate pool, not an exact workflow
+        # binding.  A broad analysis scope can legitimately contain two Hi-C
+        # matrices, loop calls and E1 tables while a single-sample figure needs
+        # only one matrix.  The contract selector below projects this pool to
+        # the inputs needed by the requested figure.
+        directory = str(selection.get("dataset_path") or (source_paths[0] if source_paths else _chat_path_parent(selected_paths[0]))).strip()
 
     # “这个目录/上面的路径” can refer to the latest path-bearing user
     # message, which makes a second turn such as “然后画 TAD 图” natural.
@@ -2033,12 +2657,16 @@ def _chat_workflow_request(
     return {
         "figure_type": figure_type,
         "explicit_paths": explicit_paths,
+        "candidate_paths": selected_paths,
         "dataset_path": directory,
         "query": region or gene,
         "gene": None if region else gene,
         "region": region,
         "resolution": resolution,
         "message": message,
+        "source_paths": source_paths,
+        "reference_build": str(selection.get("reference_build") or "hg38"),
+        "file_overrides": selection.get("file_overrides") if isinstance(selection.get("file_overrides"), dict) else {},
     }
 
 
@@ -2175,6 +2803,15 @@ def _chat_contract_error(item: Dict[str, Any], text: str) -> ValueError:
     return ValueError(f"“{item.get('label', '')}”{text}请在对话中明确给出文件路径，或回到数据面板选择文件。")
 
 
+class _ChatWorkflowChoiceRequired(ValueError):
+    """A single-input workflow has several valid files in the analysis scope."""
+
+    def __init__(self, role: str, candidates: list[Any]):
+        super().__init__("需要选择一个具体输入文件。")
+        self.role = role
+        self.candidates = candidates
+
+
 def _chat_select_workflow_files(
     scan: DatasetScan,
     figure_type: str,
@@ -2182,18 +2819,28 @@ def _chat_select_workflow_files(
     message: str,
     inspector: DataInspector,
     project_root: Path,
+    candidate_paths: Optional[list[str]] = None,
 ) -> list[str]:
     """Select only the bounded inputs required by a chat-requested workflow."""
     item = FIGURE_TYPE_BY_ID.get(str(figure_type)) or {}
     contract = item.get("input_contract") or {}
     roles = contract.get("roles") or {}
     want_tracks = any(token in str(message).casefold() for token in ("轨道", "bigwig", "bw", "gtf", "gff", "bed", "多组学", "foxj1"))
+    candidate_keys: set[str] = set()
+    if candidate_paths:
+        for raw_path in candidate_paths:
+            matched = _chat_match_selected_file(scan, raw_path, inspector, project_root)
+            if matched is not None and matched.usable:
+                candidate_keys.add(_chat_file_key(matched.path))
+        if not candidate_keys:
+            raise ValueError("右侧当前分析范围中的文件已失效或不属于已导入数据，请在“选择文件”中重新应用选择。")
     selected_by_role: Dict[str, list[Any]] = {}
     usable_by_role: Dict[str, list[Any]] = {}
     for role in roles:
         candidates = [
             file for file in scan.files
             if file.usable and file.role == str(role) and _source_type_supports_role(file.type, file.role)
+            and (not candidate_keys or _chat_file_key(file.path) in candidate_keys)
         ]
         candidates.sort(key=lambda file: (str(file.sample or "").casefold(), file.name.casefold(), file.path.casefold()))
         usable_by_role[str(role)] = candidates
@@ -2316,6 +2963,22 @@ def _chat_select_workflow_files(
     hic_candidates = usable_by_role.get("hic", [])
     hic_max = hic_rule.get("max")
     hic_min = int(hic_rule.get("min") or 0)
+    if candidate_keys and hic_max is not None and int(hic_max) == 1 and len(hic_candidates) > 1:
+        compact_message = re.sub(r"[^a-z0-9]+", "", str(message or "").casefold())
+        named_candidates = []
+        for candidate in hic_candidates:
+            aliases = {
+                re.sub(r"[^a-z0-9]+", "", str(candidate.name or "").casefold()),
+                re.sub(r"[^a-z0-9]+", "", str(Path(candidate.name).stem).casefold()),
+                re.sub(r"[^a-z0-9]+", "", str(candidate.sample or "").casefold()),
+            }
+            if any(alias and alias in compact_message for alias in aliases):
+                named_candidates.append(candidate)
+        if len(named_candidates) == 1:
+            hic_candidates = named_candidates
+            usable_by_role["hic"] = named_candidates
+        else:
+            raise _ChatWorkflowChoiceRequired("hic", hic_candidates)
     if hic_candidates:
         if hic_max is not None and int(hic_max) == hic_min:
             hic_count = hic_min
@@ -2340,7 +3003,10 @@ def _chat_select_workflow_files(
         if per_anchor:
             desired = anchor_count * max(1, minimum)
         elif minimum:
-            desired = minimum
+            # Standalone track figures should preserve all matching tracks in
+            # the user's analysis scope.  Other workflows keep the bounded
+            # minimum required by their scientific contract.
+            desired = len(candidates) if candidate_keys and role in _CHAT_TRACK_ROLES and "hic" not in roles else minimum
         else:
             # Optional tracks are opt-in from chat and are intentionally
             # bounded to one representative file per role unless paths are
@@ -2467,18 +3133,32 @@ def _chat_prepare_workflow(
     root = _chat_expand_scan_root(
         service, raw_root, list(request.get("explicit_paths") or []), figure_type,
     )
-    service.inspector.authorize_root(str(root))
+    source_paths = [str(root), *[str(value) for value in request.get("source_paths") or [] if value]]
+    for source_path in _dataset_source_paths(str(root), source_paths):
+        resolved_source = service.inspector.platform_path(source_path).expanduser()
+        if not resolved_source.is_absolute():
+            resolved_source = service.project_root / resolved_source
+        try:
+            resolved_source = resolved_source.resolve()
+        except OSError:
+            pass
+        if resolved_source.exists():
+            service.inspector.authorize_root(str(resolved_source if resolved_source.is_dir() else resolved_source.parent))
+    reference_build = str(request.get("reference_build") or "hg38")
     scan = service.scan_dataset_sources(
         str(root),
+        source_paths,
         # A genomic interval is a viewport request, not a gene lookup.  Only
         # pass an actual gene symbol to the dataset scanner; otherwise a
         # string/tuple such as ("chr1", 0, 2_000_000) can be misinterpreted
         # as a gene query and produce misleading annotation warnings.
-        gene=request.get("gene"), build="hg38",
+        gene=request.get("gene"), build=reference_build,
+        file_overrides=request.get("file_overrides") if isinstance(request.get("file_overrides"), dict) else {},
     )
     selected_paths = _chat_select_workflow_files(
         scan, figure_type, list(request.get("explicit_paths") or []), request.get("message", ""),
         service.inspector, service.project_root,
+        candidate_paths=list(request.get("candidate_paths") or []),
     )
     selected_scan = select_dataset_files(scan, selected_paths)
     bindings: list[Dict[str, Any]] = []
@@ -2509,12 +3189,12 @@ def _chat_prepare_workflow(
         )
         spec = build_workflow_spec(
             selected_scan, session.session_id, figure_type, service.references,
-            gene=request.get("gene"), build="hg38", resolution=request.get("resolution"),
+            gene=request.get("gene"), build=reference_build, resolution=request.get("resolution"),
         )
     else:
         spec = build_integrated_spec(
             selected_scan, session.session_id, service.references,
-            gene=request.get("gene"), build="hg38", resolution=request.get("resolution"),
+            gene=request.get("gene"), build=reference_build, resolution=request.get("resolution"),
         )
     if bindings:
         spec.setdefault("metadata", {})["workflow_bindings"] = bindings
@@ -2551,7 +3231,39 @@ def _chat_workflow_confirmation(
     """Prepare, explain, and hold a chat workflow until the user confirms."""
     try:
         spec, selected_paths, bindings, item = _chat_prepare_workflow(service, session, request)
-    except (OSError, PermissionError, ValueError) as exc:
+    except _ChatWorkflowChoiceRequired as exc:
+        item = FIGURE_TYPE_BY_ID.get(str(request.get("figure_type"))) or {}
+        options = [
+            {
+                "path": str(candidate.path),
+                "name": str(candidate.name),
+                "sample": str(candidate.sample or Path(candidate.name).stem),
+            }
+            for candidate in exc.candidates
+        ]
+        service.pending_actions[session.session_id] = {
+            "kind": "workflow_choice",
+            "request": deepcopy(request),
+            "role": exc.role,
+            "options": options,
+        }
+        option_text = "；".join(
+            f"{index}. {option['sample']}（{option['name']}）"
+            for index, option in enumerate(options, start=1)
+        )
+        return IntentResult(
+            "clarify",
+            f"“{item.get('label', request.get('figure_type'))}”一次使用 1 个 Hi-C 文件。请选择：{option_text}。"
+            "直接回复样本名、文件名，或“第一个/第二个”；选定后会立即开始生成，不需要再次确认。",
+            planner="chat:workflow",
+        )
+    except PermissionError:
+        return IntentResult(
+            "clarify",
+            "当前分析范围中有文件尚未授权或授权已失效。请打开右侧“管理数据”，刷新对应数据源后重新选择文件。",
+            planner="chat:workflow",
+        )
+    except (OSError, ValueError) as exc:
         return IntentResult("clarify", f"我识别到了这个绘图请求，但固定 CFIZZ 工作流暂时不能执行：{exc}", planner="chat:workflow")
     viewport = spec.get("viewport") or {}
     region = f"{viewport.get('chrom', '—')}:{int(viewport.get('start', 0)):,}-{int(viewport.get('end', 0)):,}"
@@ -2564,21 +3276,54 @@ def _chat_workflow_confirmation(
             companions = "、".join(Path(value).name for value in (binding.get("companions") or {}).values())
             pairs.append(f"{Path(binding.get('anchor_path', '')).name} → {companions}")
         pairing_text = "\n样本配对：" + "；".join(pairs)
-    reply = (
-        f"我识别到你的请求：使用“{item['label']}”（CFIZZ：{item['entrypoint']}）。\n"
-        f"数据路径：{request.get('dataset_path')}\n"
-        f"将使用文件：{names}\n"
-        f"区域：{region}；分辨率：{int(resolution):,} bp。"
-        f"{pairing_text}\n"
-        "请回复“确认”开始调用固定 CFIZZ 工作流；回复“取消”放弃。生成后仍可继续用自然语言修改。"
-    )
-    service.pending_actions[session.session_id] = {
+    pending = {
         "kind": "workflow",
         "spec": deepcopy(spec),
-        "summary": f"使用聊天确认的数据生成 {item['label']}",
-        "apply_reply": f"已确认，将使用上述文件调用 CFIZZ 官方工作流生成“{item['label']}”。",
+        "summary": f"使用聊天选择的数据生成 {item['label']}",
+        "apply_reply": (
+            f"已开始生成“{item['label']}”。使用文件：{names}；"
+            f"区域：{region}；分辨率：{int(resolution):,} bp。{pairing_text}"
+        ),
     }
-    return IntentResult("clarify", reply, planner="chat:workflow")
+    # Drawing is reversible and has no external side effect, so an explicit
+    # figure request should start immediately.  The old extra “reply 确认”
+    # step made the title change while leaving the canvas empty and was
+    # especially confusing after the user had already selected a sample.
+    return IntentResult(
+        "workflow_apply",
+        pending["apply_reply"],
+        {"workflow_pending": pending},
+        planner="chat:workflow",
+    )
+
+
+def _chat_resolve_workflow_choice(pending: Dict[str, Any], message: str) -> Optional[str]:
+    """Resolve a one-turn sample/file answer for a pending workflow choice."""
+    options = pending.get("options") if isinstance(pending.get("options"), list) else []
+    compact = re.sub(r"\s+", "", str(message or "").casefold())
+    latin_compact = re.sub(r"[^a-z0-9]+", "", compact)
+    ordinals = {
+        "第一个": 0, "第1个": 0, "第一个hic文件": 0, "第一个样本": 0,
+        "第二个": 1, "第2个": 1, "第二个hic文件": 1, "第二个样本": 1,
+        "第三个": 2, "第3个": 2, "第三个hic文件": 2, "第三个样本": 2,
+    }
+    for token, index in ordinals.items():
+        if token in compact and index < len(options):
+            return str(options[index].get("path") or "") or None
+    matches: list[str] = []
+    for option in options:
+        aliases = {
+            re.sub(r"[^a-z0-9]+", "", str(option.get("name") or "").casefold()),
+            re.sub(r"[^a-z0-9]+", "", str(Path(str(option.get("name") or "")).stem).casefold()),
+            re.sub(r"[^a-z0-9]+", "", str(option.get("sample") or "").casefold()),
+        }
+        if any(
+            alias and (alias in latin_compact or (len(latin_compact) >= 3 and latin_compact in alias))
+            for alias in aliases
+        ):
+            matches.append(str(option.get("path") or ""))
+    unique = [path for path in dict.fromkeys(matches) if path]
+    return unique[0] if len(unique) == 1 else None
 
 
 def _auto_default_viewport(spec: Dict[str, Any], figure_type: str, inspector: DataInspector) -> None:
@@ -2618,7 +3363,11 @@ def _auto_default_viewport(spec: Dict[str, Any], figure_type: str, inspector: Da
     # the feature's bin width.
     resolution_candidates: list[int] = []
     for feature_path in feature_paths:
-        value = companion_resolution(feature_path)
+        value = (
+            _feature_grid_resolution(feature_path, inspector)
+            if kind == "compartment"
+            else companion_resolution(feature_path)
+        )
         if value:
             resolution_candidates.append(int(value))
     if figure_type == "tad_diff_region":
@@ -2773,6 +3522,28 @@ def _augment_compartment_patch(patch: Dict[str, Any], spec: Dict[str, Any], insp
         and operation.get("target_kind") == "figure"
         and operation.get("field") == "figure_type"
     ]
+    target_type = str(switch_values[-1] if switch_values else spec.get("figure_type") or "")
+    if target_type == "compartment_saddle":
+        feature_paths = _selected_feature_paths(spec, "compartment", inspector)
+        resolutions = sorted({
+            int(value)
+            for path in feature_paths
+            if (value := _feature_grid_resolution(path, inspector))
+        })
+        if len(resolutions) > 1:
+            values = "、".join(f"{value:,} bp" for value in resolutions)
+            raise ValueError(f"所选 E1 文件的分辨率不一致（{values}），不能生成 Compartment Saddle。")
+        try:
+            current_resolution = int((spec.get("analysis") or {}).get("resolution") or 0)
+        except (TypeError, ValueError):
+            current_resolution = 0
+        if resolutions and current_resolution != resolutions[0]:
+            operations.append({
+                "op": "update",
+                "target_kind": "analysis",
+                "field": "resolution",
+                "value": resolutions[0],
+            })
     switches = any(value == "compartment" for value in switch_values)
     is_compartment = switches or spec.get("figure_type") == "compartment"
     if not is_compartment:
@@ -3698,14 +4469,10 @@ def _single_hic_spec(
     labels = {
         "hic_triangle": "Hi-C triangle heatmap",
         "hic_square": "Hi-C square heatmap",
-        "hic_oe": "Hi-C O/E heatmap",
         "tad_insulation": "TAD / Insulation",
-        "tad_insulation_track": "insulation score track",
-        "tad_boundary_square": "square Hi-C + TAD boundaries",
         "compartment": "A/B compartment",
         "loop_heatmap": "loop-annotated Hi-C heatmap",
         "loop_apa": "loop APA",
-        "compartment_eigenvector": "E1 eigenvector track",
         "compartment_saddle": "compartment saddle",
         "tad_boundary_pileup": "TAD boundary pileup",
     }

@@ -69,6 +69,21 @@ class DataInspectorTests(unittest.TestCase):
                 inspector.inspect(str(table), "tsv")
                 self.assertEqual(inspect_text.call_count, 3)
 
+    def test_reports_modal_bin_size_for_coordinate_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            table = Path(directory) / "uploaded-eigenvector.tsv"
+            table.write_text(
+                "chrom\tstart\tend\tE1\n"
+                "chr1\t0\t100000\t0.2\n"
+                "chr1\t100000\t200000\t-0.1\n"
+                "chr1\t200000\t250123\t0.3\n",
+                encoding="utf-8",
+            )
+            result = DataInspector([directory]).inspect(str(table), "compartment_tsv")
+
+        self.assertTrue(result.usable)
+        self.assertEqual(result.metadata["bin_size"], 100_000)
+
 
 if __name__ == "__main__":
     unittest.main()

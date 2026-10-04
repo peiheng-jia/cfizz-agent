@@ -9,7 +9,7 @@ keeping arbitrary object paths out of model control.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import re
 from typing import Any, Dict, Iterable, List, Literal, Optional, Union
@@ -28,10 +28,9 @@ _HIC_FIGURE_TYPES = frozenset(
     item["id"] for item in FIGURE_TYPES
     if "hic" in (item.get("input_contract", {}).get("roles") or {})
 )
-_RESOLUTION_FIGURE_TYPES = _HIC_FIGURE_TYPES - frozenset({"tad_insulation_track"})
+_RESOLUTION_FIGURE_TYPES = _HIC_FIGURE_TYPES
 _BALANCE_FIGURE_TYPES = _HIC_FIGURE_TYPES - frozenset({
-    "compartment_multi", "compartment_diff_region", "compartment_eigenvector",
-    "compartment_saddle", "tad_insulation_track",
+    "compartment_multi", "compartment_diff_region", "compartment_saddle",
 })
 _INTEGRATED_FIGURE_TYPES = frozenset(
     item["id"] for item in FIGURE_TYPES if item.get("track_mode") == "integrated"
@@ -40,7 +39,7 @@ _STANDALONE_TRACK_FIGURE_TYPES = frozenset({
     "tracks_signal", "tracks_genes", "tracks_intervals", "tracks_mixed",
 })
 _COMPOSITE_FIGURE_TYPES = _INTEGRATED_FIGURE_TYPES | _STANDALONE_TRACK_FIGURE_TYPES
-_LAYOUT_FIGURE_TYPES = _COMPOSITE_FIGURE_TYPES
+_LAYOUT_FIGURE_TYPES = _COMPOSITE_FIGURE_TYPES | frozenset({"tad_multi"})
 _DPI_FIGURE_TYPES = _ALL_FIGURE_TYPES - frozenset({
     "compartment_multi", "compartment_diff_region", "compartment_saddle",
 })
@@ -136,7 +135,7 @@ _BASE_DEFINITIONS = (
     ),
     ParameterDefinition(
         "layout", "font_size", "number", "整张图基础字体（pt）", 3, 24,
-        figure_types=_INTEGRATED_FIGURE_TYPES,
+        figure_types=_INTEGRATED_FIGURE_TYPES | frozenset({"tad_multi"}),
     ),
     ParameterDefinition(
         "export", "dpi", "integer", "PNG 导出清晰度（DPI）", 72, 2400,
@@ -165,13 +164,8 @@ _LAYER_STYLE_DEFINITIONS = (
         figure_types=frozenset({
             "hic_triangle", "hic_triangle_multi", "tracks_integrated",
             "tad_insulation", "hic_square", "loop_heatmap",
-            "loop_apa", "tad_boundary_square",
+            "loop_apa",
         }),
-    ),
-    ParameterDefinition(
-        "layer", "style.cmap", "string", "O/E 热图色图名称",
-        layer_kinds=frozenset({"hic"}), default="RdBu_r",
-        figure_types=frozenset({"hic_oe"}),
     ),
     ParameterDefinition(
         "layer", "style.triangle_ratio", "number", "三角热图的相对高度（不是 Loop 圈大小）",
@@ -188,23 +182,23 @@ _LAYER_STYLE_DEFINITIONS = (
         enum=("linear", "log"), layer_kinds=frozenset({"hic"}), default="linear",
         figure_types=frozenset({
             "hic_triangle", "hic_triangle_multi", "tracks_integrated",
-            "hic_square", "loop_heatmap", "tad_boundary_square",
+            "hic_square", "loop_heatmap",
         }),
     ),
     ParameterDefinition(
         "layer", "style.vmin", "number_or_null", "热图色标下限；null 表示自动", -1e12, 1e12,
         layer_kinds=frozenset({"hic"}),
-        figure_types=frozenset({"hic_square", "hic_oe", "loop_heatmap", "loop_apa", "tad_boundary_square"}),
+        figure_types=frozenset({"hic_square", "loop_heatmap", "loop_apa"}),
     ),
     ParameterDefinition(
         "layer", "style.vmax", "number_or_null", "热图色标上限；null 表示自动", -1e12, 1e12,
         layer_kinds=frozenset({"hic"}),
-        figure_types=frozenset({"hic_square", "hic_oe", "loop_heatmap", "loop_apa", "tad_boundary_square"}),
+        figure_types=frozenset({"hic_square", "loop_heatmap", "loop_apa"}),
     ),
     ParameterDefinition(
         "layer", "style.plot_size", "number", "热图尺寸", 0.5, 50,
         layer_kinds=frozenset({"hic"}), default=4.0,
-        figure_types=frozenset({"hic_square", "hic_oe", "loop_heatmap", "loop_apa", "tad_boundary_square"}),
+        figure_types=frozenset({"hic_square", "loop_heatmap", "loop_apa"}),
     ),
     ParameterDefinition(
         "layer", "style.window", "integer", "APA 窗口（bin）", 1, 1000,
@@ -224,7 +218,7 @@ _LAYER_STYLE_DEFINITIONS = (
     ParameterDefinition(
         "layer", "style.window_size", "integer", "TAD insulation 窗口（bp）", 1_000, 10_000_000,
         scientific=True, layer_kinds=frozenset({"hic"}), default=100_000,
-        figure_types=frozenset({"tad_insulation", "tad_insulation_track", "tad_diff_region", "tracks_integrated"}),
+        figure_types=frozenset({"tad_insulation", "tad_diff_region", "tracks_integrated"}),
     ),
     ParameterDefinition(
         "layer", "style.boundary_cmap", "string", "TAD 边界色图", layer_kinds=frozenset({"hic"}), default="Blues_r",
@@ -233,39 +227,6 @@ _LAYER_STYLE_DEFINITIONS = (
     ParameterDefinition(
         "layer", "style.boundary_alpha", "number", "TAD 边界透明度", 0, 1, layer_kinds=frozenset({"hic"}), default=0.9,
         figure_types=frozenset({"tad_insulation", "tad_diff_region", "tracks_integrated"}),
-    ),
-    ParameterDefinition(
-        "layer", "style.boundary_color", "string", "方形 TAD 边界线颜色", layer_kinds=frozenset({"hic"}), default="#d62728",
-        figure_types=frozenset({"tad_boundary_square"}),
-    ),
-    ParameterDefinition(
-        "layer", "style.boundary_width", "integer", "方形 TAD 边界线宽", 1, 20, layer_kinds=frozenset({"hic"}), default=2,
-        figure_types=frozenset({"tad_boundary_square"}),
-    ),
-    ParameterDefinition(
-        "layer", "style.line_color", "string", "Insulation score 曲线颜色",
-        layer_kinds=frozenset({"hic"}), default="#1f77b4",
-        figure_types=frozenset({"tad_insulation_track"}),
-    ),
-    ParameterDefinition(
-        "layer", "style.boundary_color", "string", "Insulation 边界标记颜色",
-        layer_kinds=frozenset({"hic"}), default="#d62728",
-        figure_types=frozenset({"tad_insulation_track"}),
-    ),
-    ParameterDefinition(
-        "layer", "style.show_boundaries", "boolean", "是否显示 Insulation 边界标记",
-        layer_kinds=frozenset({"hic"}), default=True,
-        figure_types=frozenset({"tad_insulation_track"}),
-    ),
-    ParameterDefinition(
-        "layer", "style.width_cm", "number", "Insulation 轨道宽度（厘米）", 3, 100,
-        layer_kinds=frozenset({"hic"}), default=25.4,
-        figure_types=frozenset({"tad_insulation_track"}),
-    ),
-    ParameterDefinition(
-        "layer", "style.height_cm", "number", "Insulation 轨道高度（厘米）", 0.5, 50,
-        layer_kinds=frozenset({"hic"}), default=5.08,
-        figure_types=frozenset({"tad_insulation_track"}),
     ),
     # These are direct CFIZZ single-figure arguments.  They are deliberately
     # scoped so a marker-size request cannot be confused with triangle height
@@ -350,30 +311,23 @@ _WORKFLOW_DEFINITIONS = (
     ParameterDefinition("figure", "workflow_options.font_size", "number", "差异散点图基础字体（pt）", 3, 24, default=7, figure_types=frozenset({"compartment_diff_scatter"})),
     ParameterDefinition("figure", "workflow_options.show_counts", "boolean", "图例是否显示数量和百分比", default=True, figure_types=frozenset({"compartment_diff_scatter"})),
 
-    # Standalone E1 track.
-    ParameterDefinition("figure", "workflow_options.positive_color", "string", "E1 正值颜色", default="#E41A1C", figure_types=frozenset({"compartment_eigenvector"})),
-    ParameterDefinition("figure", "workflow_options.negative_color", "string", "E1 负值颜色", default="#377EB8", figure_types=frozenset({"compartment_eigenvector"})),
-    ParameterDefinition("figure", "workflow_options.width_cm", "number", "E1 轨道宽度（厘米）", 3, 100, default=25.4, figure_types=frozenset({"compartment_eigenvector"})),
-    ParameterDefinition("figure", "workflow_options.height_cm", "number", "E1 轨道高度（厘米）", 0.5, 50, default=5.08, figure_types=frozenset({"compartment_eigenvector"})),
-
     # Saddle plots calculate bins and contact summaries before rendering.
     ParameterDefinition("figure", "workflow_options.n_bins", "integer", "Saddle 分箱数量", 2, 1000, default=98, scientific=True, figure_types=frozenset({"compartment_saddle"})),
-    ParameterDefinition("figure", "workflow_options.contact_type", "enum", "Saddle 接触类型", enum=("cis", "trans", "all"), default="cis", scientific=True, figure_types=frozenset({"compartment_saddle"})),
+    ParameterDefinition("figure", "workflow_options.contact_type", "enum", "Saddle 接触类型", enum=("cis", "trans"), default="cis", scientific=True, figure_types=frozenset({"compartment_saddle"})),
     ParameterDefinition("figure", "workflow_options.heatmap_size", "number", "Saddle 热图尺寸", 0.5, 50, default=1.8, figure_types=frozenset({"compartment_saddle"})),
     ParameterDefinition("figure", "workflow_options.vmin", "number", "Saddle 色标下限", -100, 100, default=-2, figure_types=frozenset({"compartment_saddle"})),
     ParameterDefinition("figure", "workflow_options.vmax", "number", "Saddle 色标上限", -100, 100, default=2, figure_types=frozenset({"compartment_saddle"})),
 
-    # TAD/insulation workflows.  ``window_size`` changes the insulation
-    # calculation; the remaining values are visual controls.
+    # TAD/insulation workflows. ``window_size`` selects precomputed columns;
+    # the concrete choices are supplied from the selected files at runtime.
     ParameterDefinition("figure", "workflow_options.window_size", "integer", "Insulation 窗口（bp）", 1_000, 10_000_000, default=100_000, scientific=True, figure_types=frozenset({"tad_multi"})),
     ParameterDefinition("figure", "workflow_options.cmap", "string", "TAD Hi-C 色图", default="Reds", figure_types=frozenset({"tad_multi"})),
     ParameterDefinition("figure", "workflow_options.vmin", "number_or_null", "TAD 色标下限；null 表示自动", -1e12, 1e12, figure_types=frozenset({"tad_multi"})),
     ParameterDefinition("figure", "workflow_options.vmax", "number_or_null", "TAD 色标上限；null 表示自动", -1e12, 1e12, figure_types=frozenset({"tad_multi"})),
     ParameterDefinition("figure", "workflow_options.color_scale", "enum", "TAD 色标缩放", enum=("linear", "log"), default="linear", figure_types=frozenset({"tad_multi"})),
-    ParameterDefinition("figure", "workflow_options.plot_size", "number", "TAD 子图尺寸", 0.5, 50, default=4, figure_types=frozenset({"tad_multi"})),
-    ParameterDefinition("figure", "workflow_options.triangle_ratio", "number", "TAD 三角热图高度比例", 0.05, 1.5, default=1, figure_types=frozenset({"tad_multi"})),
-    ParameterDefinition("figure", "workflow_options.boundary_cmap", "string", "TAD 边界色图", default="Greys", figure_types=frozenset({"tad_multi"})),
-    ParameterDefinition("figure", "workflow_options.boundary_alpha", "number", "TAD 边界透明度", 0, 1, default=0.6, figure_types=frozenset({"tad_multi"})),
+    ParameterDefinition("figure", "workflow_options.triangle_ratio", "number", "TAD 三角热图高度比例", 0.05, 1.5, default=0.5, figure_types=frozenset({"tad_multi"})),
+    ParameterDefinition("figure", "workflow_options.boundary_cmap", "string", "TAD 边界色图", default="Blues_r", figure_types=frozenset({"tad_multi"})),
+    ParameterDefinition("figure", "workflow_options.boundary_alpha", "number", "TAD 边界透明度", 0, 1, default=0.9, figure_types=frozenset({"tad_multi"})),
     ParameterDefinition("figure", "workflow_options.flank", "integer", "TAD pileup 两侧范围（bp）", 1_000, 100_000_000, default=300_000, scientific=True, figure_types=frozenset({"tad_boundary_pileup", "tad_diff_pileup"})),
     ParameterDefinition("figure", "workflow_options.method", "enum", "TAD pileup 聚合方法", enum=("mean", "median", "sum"), default="sum", figure_types=frozenset({"tad_boundary_pileup", "tad_diff_pileup"})),
     ParameterDefinition("figure", "workflow_options.top_n", "integer_or_null", "TAD pileup 使用的边界数量；null 表示全部", 1, 10_000_000, figure_types=frozenset({"tad_boundary_pileup", "tad_diff_pileup"})),
@@ -403,7 +357,7 @@ _WORKFLOW_DEFINITIONS = (
     ParameterDefinition("figure", "workflow_options.color_scale", "enum", "Loop 色标缩放", enum=("linear", "log"), default="linear", figure_types=frozenset({"loop_multi", "loop_diff_region"})),
     ParameterDefinition("figure", "workflow_options.loop_color", "string", "Loop 圈颜色", default="blue", figure_types=frozenset({"loop_multi", "loop_diff_region"})),
     ParameterDefinition("figure", "workflow_options.loop_alpha", "number", "Loop 圈透明度", 0, 1, default=0.6, figure_types=frozenset({"loop_multi", "loop_diff_region"})),
-    ParameterDefinition("figure", "workflow_options.loop_size", "number", "Loop 圈大小（CFIZZ marker size）", 0.1, 1000, default=50, figure_types=frozenset({"loop_multi", "loop_diff_region"})),
+    ParameterDefinition("figure", "workflow_options.loop_size", "number", "Loop 圈大小（CFIZZ marker size）", 0.1, 1000, default=12, figure_types=frozenset({"loop_multi", "loop_diff_region"})),
     ParameterDefinition("figure", "workflow_options.plot_size", "number", "Loop 子图尺寸", 0.5, 50, default=4, figure_types=frozenset({"loop_multi", "loop_diff_region"})),
     ParameterDefinition("figure", "workflow_options.window", "integer", "APA 窗口（bin）", 1, 1000, default=5, scientific=True, figure_types=frozenset({"loop_apa_multi", "loop_diff_apa"})),
     ParameterDefinition("figure", "workflow_options.corner_size", "integer", "APA 角落尺寸（bin）", 0, 1000, default=3, scientific=True, figure_types=frozenset({"loop_apa_multi", "loop_diff_apa"})),
@@ -433,8 +387,14 @@ _WORKFLOW_DEFINITIONS = (
 class ParameterCatalog:
     """Expose and compile the editable parameters of one current figure."""
 
-    def __init__(self, spec: Dict[str, Any]):
+    def __init__(self, spec: Dict[str, Any], *, insulation_windows: Optional[Iterable[int]] = None):
         self.spec = spec
+        if insulation_windows is None:
+            insulation_windows = spec.get("_insulation_window_options")
+        self.insulation_windows = (
+            tuple(sorted(set(int(value) for value in insulation_windows)))
+            if insulation_windows is not None else None
+        )
         self._entries = self._build_entries()
 
     def model_catalog(self) -> List[Dict[str, Any]]:
@@ -616,6 +576,16 @@ class ParameterCatalog:
         return matches[0]
 
     def _entry(self, definition: ParameterDefinition, target_id: Optional[str], target: Dict[str, Any]) -> Dict[str, Any]:
+        if definition.parameter in {"style.window_size", "workflow_options.window_size"} and self.insulation_windows is not None:
+            definition = replace(
+                definition,
+                value_type="enum",
+                enum=self.insulation_windows,
+                minimum=None,
+                maximum=None,
+                default=(100_000 if 100_000 in self.insulation_windows else
+                         self.insulation_windows[0] if self.insulation_windows else None),
+            )
         value: Any = target
         is_explicit = True
         for part in definition.parameter.split("."):

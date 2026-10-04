@@ -1,15 +1,28 @@
-const EXPECTED_API_REVISION = 14;
+const EXPECTED_API_REVISION = 18;
 const LOCAL_UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024;
 const LOCAL_UPLOAD_SUFFIXES = new Set(['.cool','.mcool','.bw','.bigwig','.gtf','.gff','.gff3','.bed','.bedpe','.tsv','.txt','.npy']);
 const storedFigureZoom = Number.parseInt(localStorage.getItem('cfizz-figure-zoom') || '', 10);
-const state = { sessionId: null, session: null, chatSessionPromise: null, activeJob: null, datasetActionInFlight: false, datasetPreviewController: null, provider: 'local', planners: [], figureTypes: [], referenceBuilds: [], datasetScan: null, datasetSources: [], activeDatasetKey: null, pendingDatasetPath: null, pendingDatasetOptions: null, datasetSourceRestoring: false, activeWorkflow: null, fileOverrides: {}, renderTimer: null, renderStartedAt: null, language: localStorage.getItem('cfizz-language') || 'zh-CN', regionEdited: false, figureZoom: Number.isFinite(storedFigureZoom) && storedFigureZoom >= 40 && storedFigureZoom <= 200 ? storedFigureZoom : 80 };
+const state = { sessionId: null, session: null, chatSessionPromise: null, activeJob: null, activeJobInfo: null, previewSessionId: null, previewVersionId: null, datasetActionInFlight: false, datasetPreviewController: null, provider: 'local', planners: [], figureTypes: [], referenceBuilds: [], datasetScan: null, datasetSources: [], activeDatasetKey: null, pendingDatasetPath: null, pendingDatasetOptions: null, datasetSourceRestoring: false, activeWorkflow: null, fileOverrides: {}, contextActiveSourceKey: null, contextFileRole: 'all', contextSelectedPaths: null, contextShowAllSelected: false, contextDraftSelection: null, contextPickerSourceKey: null, contextPickerRole: 'compatible', contextPickerDirectories: {}, renderTimer: null, renderStartedAt: null, language: localStorage.getItem('cfizz-language') || 'zh-CN', regionEdited: false, figureZoom: Number.isFinite(storedFigureZoom) && storedFigureZoom >= 40 && storedFigureZoom <= 200 ? storedFigureZoom : 80 };
 const $ = (id) => document.getElementById(id);
 
 function openDialog(id, focusId='') {
   const dialog = $(id);
-  if (!dialog || dialog.open) return;
-  dialog.showModal();
+  if (!dialog) return;
+  // Dialogs are declared beside the controls they configure, but those
+  // controls can live inside a hidden sidebar tab. Native <dialog> elements
+  // remain suppressed by a display:none ancestor even after showModal().
+  // Portal them to <body> so right-pane actions can always open them.
+  if (dialog.parentElement !== document.body) document.body.appendChild(dialog);
+  if (dialog.open) return;
+  // Apply the lightweight background state before promoting the native
+  // dialog to the top layer, avoiding one expensive full-workspace frame.
   document.body.classList.add('dialog-open');
+  try {
+    dialog.showModal();
+  } catch (error) {
+    document.body.classList.remove('dialog-open');
+    throw error;
+  }
   requestAnimationFrame(() => {
     const target = focusId ? $(focusId) : dialog.querySelector('button, input, select, textarea');
     target?.focus({preventScroll:true});
@@ -18,6 +31,15 @@ function openDialog(id, focusId='') {
 function closeDialog(id) {
   const dialog = $(id);
   if (dialog?.open) dialog.close();
+}
+
+function openDataManagementDialog() {
+  // Opening a modal above a large SVG, a long chat transcript and a file
+  // inventory can force Chromium to repaint all three layers.  Stop the
+  // background viewport request first; the dialog itself does not need a
+  // fresh preview just to become visible.
+  cancelDatasetRegionPreview();
+  openDialog('dataDialog', 'chooseLocalFiles');
 }
 
 function applyFigureZoom() {
@@ -32,10 +54,10 @@ function applyFigureZoom() {
   if (image.hidden || !image.complete || !image.naturalWidth || !image.naturalHeight) return;
   const canvasStyle = window.getComputedStyle(canvas);
   const horizontalPadding = parseFloat(canvasStyle.paddingLeft) + parseFloat(canvasStyle.paddingRight);
-  const verticalPadding = parseFloat(canvasStyle.paddingTop) + parseFloat(canvasStyle.paddingBottom);
   const availableWidth = Math.max(1, canvas.clientWidth - horizontalPadding);
-  const availableHeight = Math.max(1, canvas.clientHeight - verticalPadding);
-  const fitScale = Math.min(availableWidth / image.naturalWidth, availableHeight / image.naturalHeight);
+  // Tall track figures need vertical scrolling. Fitting their full height into
+  // the viewport would shrink every gene label after the renderer spaced it.
+  const fitScale = availableWidth / image.naturalWidth;
   const displayScale = fitScale * (zoom / 100);
   image.style.width = `${Math.max(1, Math.round(image.naturalWidth * displayScale))}px`;
   image.style.height = `${Math.max(1, Math.round(image.naturalHeight * displayScale))}px`;
@@ -59,7 +81,11 @@ function scheduleFigureZoom() {
 function datasetRegionMode() {
   return $('datasetRegionMode')?.value === 'manual' ? 'manual' : 'auto';
 }
+function isGenomeWideSaddle() {
+  return $('figureTypeSelect')?.value === 'compartment_saddle';
+}
 function datasetQuery() {
+  if (isGenomeWideSaddle()) return null;
   return datasetRegionMode() === 'manual' ? ($('datasetGene').value.trim() || null) : null;
 }
 function parseRegionInput(value) {
@@ -73,6 +99,7 @@ function parseRegionInput(value) {
   return Number.isFinite(start) && Number.isFinite(end) && end > start ? {chrom:match[1], start, end} : null;
 }
 function datasetRegionError() {
+  if (isGenomeWideSaddle()) return '';
   if (datasetRegionMode() !== 'manual') return '';
   const value = $('datasetGene').value.trim();
   if (!value) return t('regionEmpty');
@@ -128,6 +155,10 @@ function scheduleDatasetRegionPreview(delay=350) {
 }
 async function previewDatasetRegion(requestId) {
   if (requestId !== datasetRegionPreviewRequest || !state.datasetScan || state.datasetActionInFlight || state.activeJob) return;
+  if (isGenomeWideSaddle()) {
+    setDatasetRegionStatus(t('saddleGenomeWide'), 'ready');
+    return;
+  }
   const item = currentFigureTypeItem();
   const readiness = workflowReadiness(item);
   if (!item || !readiness.ready) {
@@ -177,6 +208,17 @@ async function previewDatasetRegion(requestId) {
 function updateDatasetRegionControl() {
   const input = $('datasetGene');
   if (!input) return;
+  const mode = $('datasetRegionMode');
+  if (isGenomeWideSaddle()) {
+    cancelDatasetRegionPreview();
+    if (mode) mode.disabled = true;
+    input.disabled = true;
+    input.placeholder = t('saddleGenomeWideShort');
+    state.regionEdited = false;
+    setDatasetRegionStatus(t('saddleGenomeWide'), 'ready');
+    return;
+  }
+  if (mode) mode.disabled = false;
   const manual = datasetRegionMode() === 'manual';
   input.disabled = !manual;
   input.placeholder = t(manual ? 'regionManualPlaceholder' : 'regionAutoPlaceholder');
@@ -190,6 +232,7 @@ function updateDatasetRegionControl() {
   scheduleDatasetRegionPreview(100);
 }
 function requireValidDatasetRegion() {
+  if (isGenomeWideSaddle()) return true;
   const error = datasetRegionError();
   if (!error) return true;
   setDatasetRegionStatus(error, 'error');
@@ -208,14 +251,14 @@ const messages = {
     loadingConfig:'正在读取配置……', keySecretHint:'密钥仅保存在内存，服务重启后清除。', backToWorkflows:'返回工作流',
     show:'显示', hide:'隐藏', connectUse:'连接并使用', disconnect:'断开并清除', startHic:'单个 Hi-C 文件', dataSource:'数据源',
     load:'导入数据源', importedSources:'已导入数据源', sessionOnlySources:'勾选本次要合并使用的数据来源。', activeSource:'当前', switchSource:'切换', includedSource:'已加入', excludedSource:'未加入', refreshSource:'刷新', removeSource:'移除', sourceCount:(n)=>`${n} 个`, sourceSelectionCount:(selected,total)=>`${selected}/${total} 已加入`, sourceMeta:(hic, files)=>`${hic} 个 Hi-C · ${files} 个文件`, sourceSwitched:(name)=>`已切换到 ${name}`, sourceIncluded:(name,n)=>`已加入 ${name}，当前合并 ${n} 个数据源`, sourceExcluded:(name)=>`已暂停使用 ${name}`, sourceImported:(name)=>`已导入 ${name}`, sourceRefreshed:(name)=>`已刷新 ${name}`, sourceRemoved:(name)=>`已从当前页面移除 ${name}（磁盘文件未删除）`, noSourceSelected:'请在“导入 / 管理数据”中至少加入一个数据源。', combinedSourceSummary:(sources,hic,tracks,files)=>`已合并 ${sources} 个数据源 · ${hic} 个 Hi-C · ${tracks} 条轨道/注释 · 共 ${files} 个文件`, workspaceStatus:'当前工作区', dataWorkspaceEmpty:'尚未导入数据', dataWorkspaceEmptyHint:'导入 .cool/.mcool 文件或实验目录后开始绘图。', dataWorkspaceReady:(included,total)=>included === total ? `${included} 个数据源已就绪` : `${included}/${total} 个数据源已加入`, dataWorkspaceReadyHint:(hic,tracks,files)=>`${hic} 个 Hi-C · ${tracks} 条轨道/注释 · ${files} 个文件`, manageData:'导入 / 管理数据', dialogueSettings:'对话设置', dialogueSettingsTitle:'对话理解设置', dialogueSettingsHint:'选择理解模式，或连接 OpenAI / DeepSeek。', importDataTitle:'导入与管理数据', importDataHint:'添加来源、设置绘图区域，并管理本次使用的数据。', close:'关闭', done:'完成', figureType:'图类型', figureGenerate:'图形与生成', figureGenerateHint:'先选择要生成的图；下方文件用于微调输入。', figureGenerateCompactHint:'选择图形，确认输入后直接生成。', selectedFigure:'当前图形', selectFigureType:'选择图类型', figureSelection:'选择图形', figureSelectionHint:'先选择基础图形；复杂分析可从下方工作流进入。', directFigures:'基础图形', figureRequires:(value)=>`需要 ${value}`, inputDetails:'绘图输入与分辨率', inputDetailsHint:'需要时展开调整文件和共同分辨率。', advanced:'高级', applyCurrent:'应用到当前图', selectFigure:'选择图类型后生成', vectorPreview:'SVG 高清预览', rasterPreview:'PNG 预览', scanDataset:'实验目录', scanDirectory:'扫描目录', resolutionChoice:'共同分辨率', resolutionAuto:'自动选择',
-    targetGene:'基因或范围（如 FOXJ1、chr1:1-2Mb）', drawingRegion:'绘图区域', regionAuto:'自动推荐', regionManual:'指定区域', referenceGenome:'参考注释', regionAutoPlaceholder:'由系统根据图类型与所选文件推荐', regionManualPlaceholder:'输入基因名或范围，如 MYC、chr1:25-45Mb', regionAutoWaiting:'导入数据并选择图类型后，将在这里显示预计范围。', regionManualWaiting:'导入数据后将验证并显示实际绘图范围。', regionEmpty:'请输入基因名或染色体范围。', regionInvalid:'区域格式不正确，请输入如 chr1:25-45Mb。', regionPreviewing:'正在计算预计绘图范围……', regionNeedsInputs:(missing)=>`补齐当前图所需输入后，将显示预计范围（缺少：${missing}）。`, requiredInput:'所需输入', regionManualExpected:(input,region)=>`已识别“${input}”，生成时将使用 ${region}。`, regionAutoExpected:(region,reason)=>`预计使用 ${region}${reason ? ` · ${reason}` : ' · 根据当前图类型与所选文件自动推荐。'}`, regionPreviewUnavailable:'暂时无法计算预计范围。', specifyRegion:'请指定绘图区域', humanHg38:'内置 · hg38 / GRCh38', authorizationTitle:'需要授权新目录', authorizationMessage:(path)=>`新数据源“${path}”尚未授权。已导入的数据会继续保留，授权后将自动扫描这个目录。`, authorizationFailed:(message)=>`授权未完成：${message}`, authorizationDismiss:'暂不处理', authorizeRetry:'授权并重新扫描', authorizing:'正在授权…', buildSelected:'生成图形', buildMultiomics:'生成默认整合图', confirmPairing:'我已确认以上样本对应关系', sampleName:'样本名', detectedRole:'数据角色',
+    targetGene:'基因或范围（如 FOXJ1、chr1:1-2Mb）', drawingRegion:'绘图区域', regionAuto:'自动推荐', regionManual:'指定区域', referenceGenome:'参考注释', regionAutoPlaceholder:'由系统根据图类型与所选文件推荐', regionManualPlaceholder:'输入基因名或范围，如 MYC、chr1:25-45Mb', regionAutoWaiting:'导入数据并选择图类型后，将在这里显示预计范围。', regionManualWaiting:'导入数据后将验证并显示实际绘图范围。', regionEmpty:'请输入基因名或染色体范围。', regionInvalid:'区域格式不正确，请输入如 chr1:25-45Mb。', regionPreviewing:'正在计算预计绘图范围……', regionNeedsInputs:(missing)=>`补齐当前图所需输入后，将显示预计范围（缺少：${missing}）。`, requiredInput:'所需输入', regionManualExpected:(input,region)=>`已识别“${input}”，生成时将使用 ${region}。`, regionAutoExpected:(region,reason)=>`预计使用 ${region}${reason ? ` · ${reason}` : ' · 根据当前图类型与所选文件自动推荐。'}`, regionPreviewUnavailable:'暂时无法计算预计范围。', saddleGenomeWide:'Compartment Saddle 是全基因组聚合分析，不使用局部绘图区域；系统会自动采用 E1 文件的分辨率。', saddleGenomeWideShort:'全基因组聚合，无需填写区域', specifyRegion:'请指定绘图区域', humanHg38:'内置 · hg38 / GRCh38', authorizationTitle:'需要授权新目录', authorizationMessage:(path)=>`新数据源“${path}”尚未授权。已导入的数据会继续保留，授权后将自动扫描这个目录。`, authorizationFailed:(message)=>`授权未完成：${message}`, authorizationDismiss:'暂不处理', authorizeRetry:'授权并重新扫描', authorizing:'正在授权…', buildSelected:'生成图形', buildMultiomics:'生成默认整合图', confirmPairing:'我已确认以上样本对应关系', sampleName:'样本名', detectedRole:'数据角色',
     loadingTypes:'正在读取图类型……', serverAuth:'', datasetHint:'本机文件会先上传到服务器并自动识别；也可以使用服务器上的现有目录。', dataPathPlaceholder:'/data/sample.mcool 或 /data/case1', datasetPathPlaceholder:'E:\\project\\case1 或 /data/case1', combinedWorkflows:'', combinedWorkflowsHint:'', workflowCatalog:'更多 CFIZZ 工作流', useWorkflow:'选择文件', missingData:'补充数据', workflowNeeds:'需要', selectAll:'全选', clearAll:'清空', selectRecommended:'推荐选择', workflowInputs:'选择本次工作流使用的文件', buildWorkflow:'生成', addTracks:'添加轨道到当前图', addingTracks:'正在添加轨道', trackAlreadyPresent:'所选轨道已经在当前图中，无需重复添加。', tracksNotIncluded:'所选图形的 CFIZZ 接口没有整合轨道面板；本次只生成 Hi-C 图，已选轨道仍保留在会话中。', uploadSupplement:'上传补充文件', uploading:'正在上传补充文件……', uploadDone:'补充完成，正在重新扫描……', loadFigureFirst:'请先载入 Hi-C 文件或扫描实验目录。', workflowQueued:'已提交工作流请求；系统会复用当前数据，缺少输入时会提示。', workflowBuilding:'正在根据所选数据创建图形……', workflowCreated:'已根据所选数据创建图形，之后可以继续用对话修改。',
-    welcomeMessage:'欢迎使用 CFIZZ Agent。请先导入数据或载入示例开始绘图；生成图形后，可在此调整区域、轨道与样式。',
+    welcomeMessage:'CFIZZ Agent 已就绪。请导入实验数据或载入示例；我会结合当前选择的文件、可用图形与最近对话，协助生成和调整可视化。',
     chatPlaceholder:'描述要生成的图，或说明需要调整的区域、轨道和样式……', sendDraw:'发送', enterHint:'Enter 发送 · Shift+Enter 换行', currentFigure:'CURRENT FIGURE', noFigure:'尚未载入图形',
-    history:'历史版本', startConversation:'尚未生成图形', emptyHint:'导入数据或载入示例后，当前图和历史版本将在这里显示。', previewSize:'预览大小', fitWindow:'适应窗口',
+    history:'历史版本', startConversation:'尚未生成图形', emptyHint:'导入数据或载入示例后，当前图和历史版本将在这里显示。', previewSize:'预览大小', fitWindow:'适应宽度',
     versionHistory:'版本历史', historyHint:'选择任一版本恢复并重新绘图', region:'区域', resolution:'分辨率', version:'版本', download:'下载',
-    checking:'检测中', localRules:'本地规则', unknownStatus:'状态未知', waiting:'等待开始', rendering:'正在生成图形', queued:'等待绘图资源', drawing:'正在渲染图形',
-    completed:'绘图完成', failed:'绘图失败', elapsed:(n)=>`已用时 ${n} 秒`, preparing:'正在准备数据与绘图参数……', current:'当前', figureEdit:'图形修改', extraInput:'（需额外输入）', tracksExcluded:'（不含已选轨道）'
+    checking:'检测中', localRules:'本地规则', unknownStatus:'状态未知', waiting:'等待开始', rendering:'正在生成图形', queued:'等待绘图资源', drawing:'正在渲染图形', cancelling:'正在取消', cancelled:'已取消生成', cancelRender:'取消生成', stoppingRender:'正在停止计算进程……',
+    completed:'绘图完成', failed:'绘图失败', elapsed:(n)=>`已用时 ${n}`, estimatedProgress:(n)=>`预计 ${n}%`, eta:(value)=>`预计还需 ${value}`, etaQueued:(value)=>`预计约 ${value} 后完成`, etaCalculating:'正在估算剩余时间', etaOverrun:'已超过初始预估，仍在计算', preparing:'正在准备数据与绘图参数……', current:'当前', figureEdit:'图形修改', extraInput:'（需额外输入）', tracksExcluded:'（不含已选轨道）'
   },
   en: {
     subtitle:'Conversational Hi-C visualization', loadDemo:'Load FOXJ1 demo', undo:'Undo', redo:'Redo', chat:'Chat', dataApi:'Data & API',
@@ -225,15 +268,15 @@ const messages = {
     dialogueApi:'Interpretation mode', connectAi:'API settings', memoryOnly:'Temporary', apiKeyPlaceholder:'Enter API Key', show:'Show', hide:'Hide',
     loadingConfig:'Loading configuration…', keySecretHint:'The key stays in memory and is cleared on restart.', backToWorkflows:'Back to workflows',
     connectUse:'Connect and use', disconnect:'Disconnect and clear', startHic:'Single Hi-C file', dataSource:'Data source', load:'Import source', importedSources:'Imported data sources', sessionOnlySources:'Select the sources to combine for this build.', activeSource:'Current', switchSource:'Switch', includedSource:'Included', excludedSource:'Not included', refreshSource:'Refresh', removeSource:'Remove', sourceCount:(n)=>`${n} source${n === 1 ? '' : 's'}`, sourceSelectionCount:(selected,total)=>`${selected}/${total} included`, sourceMeta:(hic, files)=>`${hic} Hi-C · ${files} file${files === 1 ? '' : 's'}`, sourceSwitched:(name)=>`Switched to ${name}`, sourceIncluded:(name,n)=>`Included ${name}; ${n} sources are now combined`, sourceExcluded:(name)=>`Paused ${name}`, sourceImported:(name)=>`Imported ${name}`, sourceRefreshed:(name)=>`Refreshed ${name}`, sourceRemoved:(name)=>`Removed ${name} from this page (files on disk were not deleted)`, noSourceSelected:'Include at least one source in Import / manage data.', combinedSourceSummary:(sources,hic,tracks,files)=>`Combined ${sources} source${sources === 1 ? '' : 's'} · ${hic} Hi-C · ${tracks} track/annotation file${tracks === 1 ? '' : 's'} · ${files} files total`, workspaceStatus:'Current workspace', dataWorkspaceEmpty:'No data imported', dataWorkspaceEmptyHint:'Import a .cool/.mcool file or experiment directory to begin.', dataWorkspaceReady:(included,total)=>included === total ? `${included} data source${included === 1 ? '' : 's'} ready` : `${included}/${total} sources included`, dataWorkspaceReadyHint:(hic,tracks,files)=>`${hic} Hi-C · ${tracks} track/annotation · ${files} files`, manageData:'Import / manage data', dialogueSettings:'Chat settings', dialogueSettingsTitle:'Chat interpretation', dialogueSettingsHint:'Choose an interpretation mode or connect OpenAI / DeepSeek.', importDataTitle:'Import and manage data', importDataHint:'Add sources, set the figure region, and manage inputs for this workspace.', close:'Close', done:'Done', figureType:'Figure type', figureGenerate:'Figure & build', figureGenerateHint:'Choose the figure first; use the files below to fine-tune its inputs.', figureGenerateCompactHint:'Choose a figure, confirm its inputs, and build.', selectedFigure:'Current figure', selectFigureType:'Choose a figure type', figureSelection:'Choose a figure', figureSelectionHint:'Choose a basic figure or open an advanced CFIZZ workflow below.', directFigures:'Basic figures', figureRequires:(value)=>`Requires ${value}`, inputDetails:'Figure inputs & resolution', inputDetailsHint:'Expand only when you need to adjust files or shared resolution.', advanced:'Advanced', applyCurrent:'Apply to current figure', vectorPreview:'Crisp SVG preview', rasterPreview:'PNG preview',
-    scanDataset:'Experiment directory', scanDirectory:'Scan directory', resolutionChoice:'Shared resolution', resolutionAuto:'Automatic', targetGene:'Gene or region (e.g. FOXJ1 or chr1:1-2Mb)', drawingRegion:'Figure region', regionAuto:'Auto recommend', regionManual:'Specify region', referenceGenome:'Reference annotation', regionAutoPlaceholder:'Recommended from the figure type and selected files', regionManualPlaceholder:'Enter a gene or range, e.g. MYC or chr1:25-45Mb', regionAutoWaiting:'Import data and choose a figure to see the expected region.', regionManualWaiting:'The region will be validated after data is imported.', regionEmpty:'Enter a gene or genomic range.', regionInvalid:'Invalid range. Use a format such as chr1:25-45Mb.', regionPreviewing:'Calculating the expected figure region…', regionNeedsInputs:(missing)=>`The expected region will appear when the current figure has its required inputs (missing: ${missing}).`, requiredInput:'required input', regionManualExpected:(input,region)=>`“${input}” resolves to ${region}; this region will be used.`, regionAutoExpected:(region)=>`Expected region: ${region} · Recommended from the current figure and selected files.`, regionPreviewUnavailable:'The expected region is not available yet.', specifyRegion:'Specify figure region', humanHg38:'Built in · hg38 / GRCh38', selectFigure:'Choose a figure type, then build', confirmPairing:'I confirm these sample pairings', sampleName:'Sample name', detectedRole:'Data role',
+    scanDataset:'Experiment directory', scanDirectory:'Scan directory', resolutionChoice:'Shared resolution', resolutionAuto:'Automatic', targetGene:'Gene or region (e.g. FOXJ1 or chr1:1-2Mb)', drawingRegion:'Figure region', regionAuto:'Auto recommend', regionManual:'Specify region', referenceGenome:'Reference annotation', regionAutoPlaceholder:'Recommended from the figure type and selected files', regionManualPlaceholder:'Enter a gene or range, e.g. MYC or chr1:25-45Mb', regionAutoWaiting:'Import data and choose a figure to see the expected region.', regionManualWaiting:'The region will be validated after data is imported.', regionEmpty:'Enter a gene or genomic range.', regionInvalid:'Invalid range. Use a format such as chr1:25-45Mb.', regionPreviewing:'Calculating the expected figure region…', regionNeedsInputs:(missing)=>`The expected region will appear when the current figure has its required inputs (missing: ${missing}).`, requiredInput:'required input', regionManualExpected:(input,region)=>`“${input}” resolves to ${region}; this region will be used.`, regionAutoExpected:(region)=>`Expected region: ${region} · Recommended from the current figure and selected files.`, regionPreviewUnavailable:'The expected region is not available yet.', saddleGenomeWide:'Compartment Saddle is a genome-wide aggregate and does not use a local viewport. Its resolution follows the selected E1 table automatically.', saddleGenomeWideShort:'Genome-wide aggregate; no region required', specifyRegion:'Specify figure region', humanHg38:'Built in · hg38 / GRCh38', selectFigure:'Choose a figure type, then build', confirmPairing:'I confirm these sample pairings', sampleName:'Sample name', detectedRole:'Data role',
     authorizationTitle:'New directory permission required', authorizationMessage:(path)=>`“${path}” is not authorized yet. Existing imports remain available; after permission is granted, this directory will be scanned automatically.`, authorizationFailed:(message)=>`Authorization did not complete: ${message}`, authorizationDismiss:'Not now', authorizeRetry:'Authorize and rescan', authorizing:'Authorizing…', buildSelected:'Build figure', buildMultiomics:'Build default integrated figure',
     loadingTypes:'Loading figure types…', serverAuth:'', datasetHint:'Local files are uploaded to the server and identified automatically; existing server directories can also be used.', dataPathPlaceholder:'/data/sample.mcool or /data/case1', datasetPathPlaceholder:'E:\\project\\case1 or /data/case1', combinedWorkflows:'', combinedWorkflowsHint:'', workflowCatalog:'More CFIZZ workflows', useWorkflow:'Choose files', missingData:'Add data', workflowNeeds:'Needs', selectAll:'Select all', clearAll:'Clear', selectRecommended:'Recommended', workflowInputs:'Choose files for this workflow', buildWorkflow:'Build', addTracks:'Add tracks to current figure', addingTracks:'Adding tracks', trackAlreadyPresent:'The selected tracks are already in the current figure; nothing to add.', tracksNotIncluded:'The selected CFIZZ renderer has no integrated track panel; this build will contain Hi-C only, while the checked tracks remain available in the session.', uploadSupplement:'Upload supporting files', uploading:'Uploading supporting files…', uploadDone:'Uploaded; rescanning…', loadFigureFirst:'Load a Hi-C file or scan a data directory.', workflowQueued:'Workflow request submitted; current inputs will be reused and missing data will be reported.', workflowBuilding:'Building a figure from the selected data…', workflowCreated:'Figure created from the selected data. You can continue editing it in chat.',
-    welcomeMessage:'Welcome to CFIZZ Agent. Import data or load the demo to begin; after a figure is created, use this chat to refine its region, tracks, and styling.',
+    welcomeMessage:'CFIZZ Agent is ready. Import experimental data or load the demo; I will use the selected files, available visualizations, and recent dialogue to help build and refine the figure.',
     chatPlaceholder:'Describe a figure to create, or a region, track, or style to adjust…', sendDraw:'Send', enterHint:'Enter to send · Shift+Enter for a new line', currentFigure:'CURRENT FIGURE', noFigure:'No figure loaded',
-    history:'History', startConversation:'No figure generated', emptyHint:'Import data or load the demo; the current figure and version history will appear here.', previewSize:'Preview size', fitWindow:'Fit window',
+    history:'History', startConversation:'No figure generated', emptyHint:'Import data or load the demo; the current figure and version history will appear here.', previewSize:'Preview size', fitWindow:'Fit width',
     versionHistory:'Version history', historyHint:'Select a version to restore and render it again', region:'Region', resolution:'Resolution', version:'Version', download:'Download',
-    checking:'Checking', localRules:'Local rules', unknownStatus:'Unknown status', waiting:'Waiting', rendering:'Generating figure', queued:'Waiting for renderer', drawing:'Rendering figure',
-    completed:'Figure ready', failed:'Render failed', elapsed:(n)=>`${n}s elapsed`, preparing:'Preparing data and plotting parameters…', current:'Current', figureEdit:'Figure edit', extraInput:' (additional input required)', tracksExcluded:'(checked tracks not included)'
+    checking:'Checking', localRules:'Local rules', unknownStatus:'Unknown status', waiting:'Waiting', rendering:'Generating figure', queued:'Waiting for renderer', drawing:'Rendering figure', cancelling:'Cancelling', cancelled:'Build cancelled', cancelRender:'Cancel build', stoppingRender:'Stopping the render process…',
+    completed:'Figure ready', failed:'Render failed', elapsed:(n)=>`${n} elapsed`, estimatedProgress:(n)=>`Est. ${n}%`, eta:(value)=>`About ${value} remaining`, etaQueued:(value)=>`About ${value} to completion`, etaCalculating:'Estimating time remaining', etaOverrun:'Past the initial estimate; still running', preparing:'Preparing data and plotting parameters…', current:'Current', figureEdit:'Figure edit', extraInput:' (additional input required)', tracksExcluded:'(checked tracks not included)'
   }
 };
 function t(key, ...args) { const value = messages[state.language]?.[key] ?? messages['zh-CN'][key] ?? key; return typeof value === 'function' ? value(...args) : value; }
@@ -368,11 +411,13 @@ function applyLanguage(language) {
     $('applyFigureType').hidden = true;
     $('applyFigureType').textContent = t('selectFigure');
   }
-  if (!$('previewQuality').hidden) $('previewQuality').textContent = t($('figureImage').dataset.previewFormat === 'svg' ? 'vectorPreview' : 'rasterPreview');
+  if (!$('previewQuality').hidden && $('figureImage').dataset.previewFormat === 'png') $('previewQuality').textContent = `${t('rasterPreview')} · ${state.previewVersionId || '—'}`;
   if (state.session) updateHistory(state.session.history || []);
   updateDatasetRegionControl();
   updateDatasetWorkspaceSummary();
   syncFigureTypeTrigger();
+  if (state.activeJobInfo) updateRenderProgress(state.activeJobInfo);
+  renderWorkspaceContext();
 }
 
 function updateDatasetWorkspaceSummary() {
@@ -404,7 +449,9 @@ function syncFigureTypeTrigger() {
   if (!select || !label || !meta) return;
   const item = currentFigureTypeItem();
   label.textContent = select.selectedOptions[0]?.textContent || t('selectFigureType');
-  meta.textContent = item ? t('figureRequires', figureRequirementText(item)) : t('loadingTypes');
+  meta.textContent = item
+    ? t('figureRequires', figureRequirementText(item))
+    : (state.language === 'en' ? 'Choose a visualization to start building' : '选择图形后开始生成');
   syncFigureTypeChoices();
 }
 
@@ -427,6 +474,22 @@ function addMessage(role, text, planner='') {
   const route = plannerRouteLabel(planner);
   if (role !== 'user' && route) item.querySelector('span').textContent = `Agent · ${route}`;
   item.querySelector('p').textContent = text;
+  if (role !== 'user' && (text.length > 320 || text.split('\n').length > 7)) {
+    item.classList.add('message-collapsed');
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'message-expand';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.textContent = state.language === 'en' ? 'Show full reply' : '展开完整回复';
+    toggle.addEventListener('click', () => {
+      const expanded = item.classList.toggle('message-expanded');
+      toggle.setAttribute('aria-expanded', String(expanded));
+      toggle.textContent = state.language === 'en'
+        ? (expanded ? 'Collapse reply' : 'Show full reply')
+        : (expanded ? '收起回复' : '展开完整回复');
+    });
+    item.appendChild(toggle);
+  }
   $('messages').appendChild(item);
   $('messages').scrollTop = $('messages').scrollHeight;
 }
@@ -439,6 +502,98 @@ function switchSidebar(panel) {
   $('chatTab').setAttribute('aria-selected', String(chatting));
   $('settingsTab').setAttribute('aria-selected', String(!chatting));
 }
+function formatJobDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return state.language === 'en' ? `${total}s` : `${total} 秒`;
+  const minutes = Math.floor(total / 60);
+  const remainder = total % 60;
+  if (!remainder) return state.language === 'en' ? `${minutes}m` : `${minutes} 分钟`;
+  return state.language === 'en' ? `${minutes}m ${remainder}s` : `${minutes} 分 ${remainder} 秒`;
+}
+function renderStageText(stage) {
+  const labels = state.language === 'en' ? {
+    queued:'Queued', starting_worker:'Starting renderer', validating_inputs:'Checking inputs', loading_renderer:'Preparing CFIZZ', reading_and_rendering:'Reading data and rendering', running_analysis:'Running analysis', aggregating_contacts:'Aggregating genome-wide contacts', verifying_outputs:'Checking output files', publishing_artifacts:'Publishing the figure', cancelling:'Stopping calculation', cancelled:'Cancelled', completed:'Complete', failed:'Failed'
+  } : {
+    queued:'等待绘图资源', starting_worker:'启动绘图进程', validating_inputs:'检查输入数据', loading_renderer:'准备 CFIZZ 绘图器', reading_and_rendering:'读取数据并绘图', running_analysis:'执行分析计算', aggregating_contacts:'聚合全基因组接触', verifying_outputs:'检查输出文件', publishing_artifacts:'发布绘图结果', cancelling:'停止计算进程', cancelled:'已取消', completed:'已完成', failed:'生成失败'
+  };
+  return labels[stage] || (state.language === 'en' ? 'Processing' : '处理中');
+}
+function renderStageDetail(stage, job={}) {
+  const queuedPosition = Math.max(0, Number(job.queue_position) || 0);
+  const details = state.language === 'en' ? {
+    queued: queuedPosition > 1 ? `${queuedPosition - 1} task(s) are ahead of this build.` : 'The task will start as soon as the renderer is free.',
+    starting_worker:'Creating an isolated process so this build can be cancelled safely.',
+    validating_inputs:'Checking file access, sample pairing, region, and resolution.',
+    loading_renderer:'Loading the selected CFIZZ workflow and plotting dependencies.',
+    reading_and_rendering:'Reading the selected matrix region, laying out panels, and exporting the figure.',
+    running_analysis:'Computing the selected analysis, then composing and exporting its panels.',
+    aggregating_contacts:'Scanning genome-wide contacts at the E1 resolution and building the Saddle matrix.',
+    verifying_outputs:'The calculation has finished; checking SVG, PNG, and PDF outputs.',
+    publishing_artifacts:'Moving complete files into the current figure version.',
+    cancelling:'Stopping this build and its child analysis processes.',
+  } : {
+    queued: queuedPosition > 1 ? `前面还有 ${queuedPosition - 1} 个绘图任务。` : '绘图器空闲后会立即开始。',
+    starting_worker:'正在创建独立绘图进程，便于安全取消本次任务。',
+    validating_inputs:'正在检查文件权限、样本配对、绘图区域和分辨率。',
+    loading_renderer:'正在加载所选 CFIZZ 工作流及绘图依赖。',
+    reading_and_rendering:'正在读取所选矩阵区域、排列面板并导出图片。',
+    running_analysis:'正在执行所选分析，然后组合面板并导出图片。',
+    aggregating_contacts:'正在按 E1 分辨率遍历全基因组接触并计算 Saddle 矩阵。',
+    verifying_outputs:'计算已经结束，正在检查 SVG、PNG 和 PDF 文件。',
+    publishing_artifacts:'正在将完整产物发布到当前图形版本。',
+    cancelling:'正在终止本次绘图及其子分析进程。',
+  };
+  return details[stage] || t('preparing');
+}
+function updateRenderClock() {
+  const info = state.activeJobInfo;
+  const started = Number(state.renderStartedAt) || Date.now();
+  const elapsed = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  $('renderElapsed').textContent = t('elapsed', formatJobDuration(elapsed));
+  if (!info) {
+    $('renderEta').textContent = t('etaCalculating');
+    return;
+  }
+  if (info.status === 'cancelling') {
+    $('renderEta').textContent = t('stoppingRender');
+    return;
+  }
+  const receivedAgo = Math.max(0, (Date.now() - Number(info.receivedAt || Date.now())) / 1000);
+  const hasRemainingEstimate = info.estimated_remaining_seconds !== null
+    && info.estimated_remaining_seconds !== undefined
+    && Number.isFinite(Number(info.estimated_remaining_seconds));
+  const remaining = hasRemainingEstimate
+    ? Math.max(0, Number(info.estimated_remaining_seconds) - receivedAgo)
+    : null;
+  if (remaining !== null && remaining > 0) {
+    $('renderEta').textContent = t(info.status === 'queued' ? 'etaQueued' : 'eta', formatJobDuration(remaining));
+  } else if (info.status === 'running' && Number(info.estimated_total_seconds) > 0 && elapsed >= Number(info.estimated_total_seconds)) {
+    $('renderEta').textContent = t('etaOverrun');
+  } else {
+    $('renderEta').textContent = t('etaCalculating');
+  }
+}
+function updateRenderProgress(job) {
+  if (!job) return;
+  state.activeJobInfo = {...job, receivedAt:Date.now()};
+  if (job.started_at) {
+    const started = Date.parse(job.started_at);
+    if (Number.isFinite(started)) state.renderStartedAt = started;
+  }
+  const progress = Math.max(0, Math.min(100, Math.round(Number(job.progress) || 0)));
+  const track = $('renderProgressTrack');
+  track.classList.toggle('indeterminate', job.status === 'queued');
+  track.setAttribute('aria-valuenow', String(progress));
+  $('renderProgressBar').style.width = job.status === 'queued' ? '' : `${progress}%`;
+  $('renderProgressText').textContent = t('estimatedProgress', progress);
+  $('renderStage').textContent = renderStageText(job.stage || job.status);
+  $('renderDetail').textContent = renderStageDetail(job.stage || job.status, job);
+  const cancelButton = $('cancelRender');
+  cancelButton.hidden = !job.cancellable;
+  cancelButton.disabled = job.status === 'cancelling';
+  cancelButton.textContent = job.status === 'cancelling' ? t('cancelling') : t('cancelRender');
+  updateRenderClock();
+}
 function setStatus(text, kind='', detail='') {
   $('statusText').textContent = text;
   $('statusText').parentElement.className = `status ${kind}`;
@@ -449,8 +604,7 @@ function setStatus(text, kind='', detail='') {
     $('renderDetail').textContent = detail || t('preparing');
     if (!state.renderStartedAt) state.renderStartedAt = Date.now();
     clearInterval(state.renderTimer);
-    const updateElapsed = () => { $('renderElapsed').textContent = t('elapsed', Math.max(0, Math.floor((Date.now()-state.renderStartedAt)/1000))); };
-    updateElapsed(); state.renderTimer = setInterval(updateElapsed, 1000);
+    updateRenderClock(); state.renderTimer = setInterval(updateRenderClock, 1000);
   } else {
     clearInterval(state.renderTimer); state.renderTimer = null; state.renderStartedAt = null;
   }
@@ -458,16 +612,37 @@ function setStatus(text, kind='', detail='') {
 function isDraftSession() {
   return Boolean(state.session?.spec?.metadata?.draft);
 }
+function clearFigurePreview() {
+  $('figureImage').removeAttribute('src');
+  $('figureImage').hidden = true;
+  $('figurePreviewFrame').hidden = true;
+  $('figureZoomControl').hidden = true;
+  $('emptyState').hidden = false;
+  $('canvas').classList.add('empty');
+  $('previewQuality').hidden = true;
+  for (const id of ['svgDownload', 'pngDownload', 'pdfDownload']) {
+    $(id).href = '#';
+    $(id).classList.add('disabled');
+  }
+  state.previewSessionId = null;
+  state.previewVersionId = null;
+}
 function setChatEnabled(enabled=true) {
   $('chatInput').disabled = !enabled;
   $('chatForm').querySelector('button').disabled = !enabled;
 }
 function formatBp(value) { return value >= 1e6 ? `${(value/1e6).toFixed(2)}M` : value >= 1e3 ? `${(value/1e3).toFixed(0)}k` : String(value); }
 function updateSession(payload) {
+  if (state.previewVersionId && (
+    state.previewSessionId !== payload.session_id || state.previewVersionId !== payload.version_id
+  )) clearFigurePreview();
   state.session = payload;
   const spec = payload.spec;
+  const draft = Boolean((spec.metadata || {}).draft);
   $('figureTitle').textContent = spec.title;
-  $('regionLabel').textContent = `${spec.viewport.chrom}:${formatBp(spec.viewport.start)}–${formatBp(spec.viewport.end)}`;
+  $('regionLabel').textContent = spec.figure_type === 'compartment_saddle'
+    ? (state.language === 'en' ? 'Genome-wide aggregate' : '全基因组聚合')
+    : `${spec.viewport.chrom}:${formatBp(spec.viewport.start)}–${formatBp(spec.viewport.end)}`;
   const resolution = spec.analysis?.resolution;
   $('resolutionLabel').textContent = resolution === 'auto'
     ? (state.language === 'en' ? 'auto' : '自动')
@@ -475,9 +650,9 @@ function updateSession(payload) {
   $('versionLabel').textContent = payload.version_id;
   $('undoButton').disabled = !payload.can_undo;
   $('redoButton').disabled = !payload.can_redo;
-  if (spec.figure_type) $('figureTypeSelect').value = spec.figure_type;
+  if (draft) $('figureTypeSelect').value = '';
+  else if (spec.figure_type) $('figureTypeSelect').value = spec.figure_type;
   updateFigureTypeHint();
-  const draft = isDraftSession();
   $('applyFigureType').disabled = draft;
   $('applyFigureType').hidden = draft;
   $('applyFigureType').textContent = draft ? t('selectFigure') : t('applyCurrent');
@@ -487,6 +662,7 @@ function updateSession(payload) {
   const managingData = Boolean($('dataDialog')?.open);
   closeDialog('figureTypeDialog');
   if (!managingData) switchSidebar('chat');
+  renderWorkspaceContext();
 }
 function formatHistoryTime(value) {
   const date = new Date(value);
@@ -586,6 +762,503 @@ function updateWorkflowReadiness() {
     row.setAttribute('aria-label', `${row.querySelector('strong')?.textContent || item.label}。${requirement?.textContent || ''}。${action?.textContent || ''}`);
   });
   updateDirectFigureReadiness();
+  renderWorkspaceContext();
+}
+
+function contextCategoryLabels() {
+  return state.language === 'en'
+    ? {basic_hic:'Basic Hi-C', comparison:'Comparison', compartment:'Compartment', tad:'TAD', loop:'Loop', pileup:'Aggregation', tracks:'Multi-omics tracks', differential:'Differential analysis'}
+    : {basic_hic:'基础 Hi-C', comparison:'样本对比', compartment:'Compartment', tad:'TAD', loop:'Loop', pileup:'聚合分析', tracks:'多组学轨道', differential:'差异分析'};
+}
+
+function contextFigureLabel(item) {
+  if (state.language !== 'en') return item.label;
+  const labels = {
+    hic_triangle:'Triangular Hi-C heatmap', hic_square:'Square Hi-C heatmap',
+    hic_multi:'Two-sample square Hi-C comparison', hic_triangle_multi:'Two-sample triangular Hi-C comparison',
+    compartment:'A/B compartment', compartment_saddle:'Compartment saddle',
+    tad_insulation:'TAD boundary region',
+    tad_boundary_pileup:'TAD boundary pileup', loop_heatmap:'Loop heatmap', loop_apa:'Loop APA',
+    compartment_multi:'Multi-sample compartment comparison', tad_multi:'Multi-sample TAD comparison', loop_multi:'Multi-sample loop comparison',
+    loop_apa_multi:'Multi-sample loop APA', tracks_integrated:'Integrated Hi-C multi-omics view', tracks_signal:'BigWig signal tracks',
+    tracks_genes:'Gene annotation tracks', tracks_intervals:'BED interval tracks', tracks_mixed:'Mixed genomic tracks',
+    compartment_diff_scatter:'Differential compartment scatter', tad_diff_stacked:'Differential TAD boundary classes',
+    loop_diff_stacked:'Differential loop classes', compartment_diff_region:'Differential compartment regions',
+    tad_diff_region:'Differential TAD regions', loop_diff_region:'Differential loop regions',
+    tad_diff_pileup:'Differential TAD boundary pileup', loop_diff_apa:'Differential loop APA',
+  };
+  return labels[item.id] || item.label;
+}
+
+function contextFigureAvailability(item) {
+  if (!item?.ready) return {kind:'unavailable', label:state.language === 'en' ? 'Unavailable' : '尚未接入', detail:item?.description || ''};
+  if (!state.datasetScan) return {kind:'missing', label:state.language === 'en' ? 'No data' : '等待数据', detail:state.language === 'en' ? 'Import data to check requirements.' : '导入数据后检查所需输入'};
+  const contextPaths = contextSelectedDatasetPaths();
+  if (!contextPaths.length) return {kind:'missing', label:state.language === 'en' ? 'Select files' : '请选择文件', detail:state.language === 'en' ? 'Add files to the analysis scope first.' : '请先把需要分析的文件加入选择'};
+  const selected = workflowReadiness(item, contextPaths);
+  if (selected.ready) return {kind:'ready', label:state.language === 'en' ? 'Ready now' : '可直接生成', detail:state.language === 'en' ? 'The selected analysis files satisfy all inputs.' : '当前分析范围已满足全部输入'};
+  const projectedPaths = projectedDatasetPathsForFigure(item, contextPaths, contextPaths);
+  const projected = workflowReadiness(item, projectedPaths);
+  if (projected.ready) return {kind:'available', label:state.language === 'en' ? 'Can generate' : '可生成', detail:state.language === 'en' ? 'Click to match the required inputs from your selection.' : '点击后将从当前选择中匹配该图所需文件'};
+  return {kind:'missing', label:state.language === 'en' ? 'Missing data' : '缺少数据', detail:projected.missing || selected.missing};
+}
+
+function setDatasetPathSelected(path, checked) {
+  const key = datasetPathKey(path);
+  const files = contextUsableFiles();
+  const selected = new Set(contextSelectedDatasetPaths().map(datasetPathKey));
+  if (checked) selected.add(key); else selected.delete(key);
+  state.contextSelectedPaths = files.filter(file => selected.has(datasetPathKey(file.path))).map(file => file.path);
+  renderWorkspaceContext();
+}
+
+function contextUsableFiles() {
+  return (state.datasetScan?.scan?.files || []).filter(file => file.usable);
+}
+
+function contextFileGroups(files=contextUsableFiles()) {
+  const groups = new Map();
+  for (const file of files) {
+    const key = file.dataset_source_key || 'dataset';
+    const source = state.datasetSources.find(item => item.key === key);
+    if (!groups.has(key)) groups.set(key, {
+      key,
+      label:file.dataset_source_label || (state.language === 'en' ? 'Data source' : '数据源'),
+      root:source?.scan?.root || source?.path || file.path?.replace(/[\\/][^\\/]+$/, '') || '',
+      files:[],
+    });
+    groups.get(key).files.push(file);
+  }
+  return [...groups.values()];
+}
+
+function contextPickerPath(value) {
+  return String(value || '').replaceAll('\\', '/').replace(/\/+$/, '');
+}
+
+function contextPickerRelativePath(file, group) {
+  const full = contextPickerPath(file?.path);
+  const root = contextPickerPath(group?.root);
+  if (root && full.toLowerCase().startsWith(`${root.toLowerCase()}/`)) return full.slice(root.length + 1);
+  return file?.name || full.split('/').pop() || full;
+}
+
+function contextPickerCurrentDirectory(group) {
+  const key = group?.key || 'dataset';
+  let current = contextPickerPath(state.contextPickerDirectories?.[key] || '').replace(/^\/+/, '');
+  const paths = (group?.files || []).map(file => contextPickerRelativePath(file, group));
+  if (current && !paths.some(path => path === current || path.startsWith(`${current}/`))) current = '';
+  state.contextPickerDirectories[key] = current;
+  return current;
+}
+
+function setContextPickerDirectory(group, directory) {
+  if (!group) return;
+  state.contextPickerDirectories[group.key] = contextPickerPath(directory).replace(/^\/+/, '');
+  if ($('contextPickerSearch')) $('contextPickerSearch').value = '';
+  renderContextFilePicker();
+}
+
+function contextFileIsCompatible(file) {
+  return Boolean(file && file.role !== 'unknown' && fileSupportsRole(file, file.role));
+}
+
+function contextFileIsSelectable(file) {
+  return contextFileIsCompatible(file);
+}
+
+function renderContextFileBrowser() {
+  const target = $('contextFileBrowser');
+  const counter = $('contextFileCount');
+  if (!target || !counter) return;
+  target.replaceChildren();
+  const files = contextUsableFiles();
+  const selectedKeys = new Set(contextSelectedDatasetPaths().map(datasetPathKey));
+  const selectedFiles = files.filter(file => selectedKeys.has(datasetPathKey(file.path)));
+  counter.textContent = state.language === 'en' ? `${selectedFiles.length} selected` : `已选 ${selectedFiles.length}`;
+  if (!files.length) {
+    const empty = document.createElement('div'); empty.className = 'context-empty context-selected-empty';
+    empty.textContent = state.language === 'en' ? 'Import data before choosing analysis files.' : '请先导入数据，再选择参与分析的文件。';
+    target.appendChild(empty);
+    return;
+  }
+  if (!selectedFiles.length) {
+    const empty = document.createElement('div'); empty.className = 'context-empty context-selected-empty';
+    const title = document.createElement('strong'); title.textContent = state.language === 'en' ? 'No files in the analysis scope' : '尚未选择分析文件';
+    const hint = document.createElement('span'); hint.textContent = state.language === 'en' ? 'Open the file picker to define the analysis scope.' : '点击“选择文件”，添加后即可查看能生成哪些图。';
+    empty.append(title, hint); target.appendChild(empty);
+    return;
+  }
+  const metrics = document.createElement('div'); metrics.className = 'context-selection-metrics';
+  const roleGroups = [
+    {label:'Hi-C', roles:['hic']},
+    {label:state.language === 'en' ? 'Signals' : '信号', roles:['signal']},
+    {label:state.language === 'en' ? 'Annotations' : '注释', roles:['gene_annotation','intervals']},
+    {label:state.language === 'en' ? 'Results' : '结果', roles:['loops','insulation','boundaries','compartment','oe']},
+  ];
+  for (const group of roleGroups) {
+    const count = selectedFiles.filter(file => group.roles.includes(file.role)).length;
+    if (!count) continue;
+    const metric = document.createElement('span'); metric.className = 'context-selection-metric';
+    const number = document.createElement('strong'); number.textContent = String(count);
+    const label = document.createElement('span'); label.textContent = group.label;
+    metric.append(number, label); metrics.appendChild(metric);
+  }
+  if (metrics.childElementCount) target.appendChild(metrics);
+  const list = document.createElement('div'); list.className = 'context-selected-list';
+  const visibleFiles = state.contextShowAllSelected ? selectedFiles : selectedFiles.slice(0, 2);
+  for (const file of visibleFiles) {
+    const row = document.createElement('div'); row.className = 'context-selected-file'; row.title = file.path;
+    const copy = document.createElement('div'); copy.className = 'context-selected-file-copy';
+    const name = document.createElement('strong'); name.textContent = file.name;
+    const meta = document.createElement('small'); meta.textContent = `${datasetRoleLabel(file.role)} · ${file.sample || file.auto_sample || (state.language === 'en' ? 'No sample name' : '未命名样本')}`;
+    copy.append(name, meta);
+    const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = state.language === 'en' ? 'Remove' : '移除';
+    remove.setAttribute('aria-label', `${state.language === 'en' ? 'Remove' : '移除'} ${file.name}`);
+    remove.addEventListener('click', () => setDatasetPathSelected(file.path, false));
+    row.append(copy, remove); list.appendChild(row);
+  }
+  target.appendChild(list);
+  if (selectedFiles.length > 2) {
+    const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'context-selected-toggle';
+    toggle.textContent = state.contextShowAllSelected
+      ? (state.language === 'en' ? 'Show fewer files' : '收起文件列表')
+      : (state.language === 'en' ? `Show all ${selectedFiles.length} files` : `查看全部 ${selectedFiles.length} 个文件`);
+    toggle.setAttribute('aria-expanded', String(state.contextShowAllSelected));
+    toggle.addEventListener('click', () => { state.contextShowAllSelected = !state.contextShowAllSelected; renderContextFileBrowser(); });
+    target.appendChild(toggle);
+  }
+}
+
+function contextPickerRoleDefinitions(files) {
+  const resultRoles = new Set(['intervals','loops','compartment','insulation','boundaries','oe']);
+  return [
+    {id:'compatible', label:state.language === 'en' ? 'Available for analysis' : '可用于分析', matches:file => contextFileIsCompatible(file)},
+    {id:'all', label:state.language === 'en' ? 'All files' : '全部文件', matches:()=>true},
+    {id:'hic', label:'Hi-C', matches:file => file.role === 'hic'},
+    {id:'signal', label:state.language === 'en' ? 'Signal tracks' : '信号轨道', matches:file => file.role === 'signal'},
+    {id:'results', label:state.language === 'en' ? 'Analysis results' : '分析结果', matches:file => resultRoles.has(file.role)},
+    {id:'gene_annotation', label:state.language === 'en' ? 'Gene annotation' : '基因注释', matches:file => file.role === 'gene_annotation'},
+    {id:'unknown', label:state.language === 'en' ? 'Unrecognized' : '未识别', matches:file => file.role === 'unknown'},
+  ].map(entry => ({...entry, count:files.filter(entry.matches).length}));
+}
+
+function contextPickerFileStatus(file) {
+  if (file.role === 'unknown') return state.language === 'en' ? 'Unrecognized' : '未识别';
+  if (!contextFileIsCompatible(file)) return state.language === 'en' ? 'Unsupported' : '不支持';
+  return state.language === 'en' ? 'Available' : '可选择';
+}
+
+function updateContextPickerCounts(visibleCount=null) {
+  const selected = state.contextDraftSelection?.size || 0;
+  if ($('contextPickerSelectionCount')) $('contextPickerSelectionCount').textContent = state.language === 'en' ? `${selected} files selected` : `已选择 ${selected} 个文件`;
+  if (visibleCount != null && $('contextPickerVisibleCount')) $('contextPickerVisibleCount').textContent = state.language === 'en' ? `${visibleCount} items shown` : `当前显示 ${visibleCount} 个项目`;
+}
+
+function syncContextPickerRows() {
+  document.querySelectorAll('#contextPickerList input[data-dataset-path]').forEach(input => {
+    input.checked = Boolean(state.contextDraftSelection?.has(datasetPathKey(input.dataset.datasetPath)));
+    input.closest('.context-picker-row')?.classList.toggle('selected', input.checked);
+  });
+}
+
+function renderContextFilePicker() {
+  const files = contextUsableFiles();
+  const groups = contextFileGroups(files);
+  const sourceTabs = $('contextPickerSourceTabs');
+  const breadcrumb = $('contextPickerBreadcrumb');
+  const navigation = $('contextPickerRoles');
+  const list = $('contextPickerList');
+  if (!sourceTabs || !breadcrumb || !navigation || !list) return;
+  sourceTabs.replaceChildren(); breadcrumb.replaceChildren(); navigation.replaceChildren(); list.replaceChildren();
+  if (!groups.length) {
+    const empty = document.createElement('div'); empty.className = 'context-picker-empty'; empty.textContent = state.language === 'en' ? 'No imported files.' : '当前没有已导入文件。'; list.appendChild(empty); updateContextPickerCounts(0); return;
+  }
+  if (!groups.some(group => group.key === state.contextPickerSourceKey)) state.contextPickerSourceKey = groups[0].key;
+  const active = groups.find(group => group.key === state.contextPickerSourceKey) || groups[0];
+  for (const group of groups) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = group.key === active.key ? 'active' : '';
+    button.textContent = `${group.label} (${group.files.length})`;
+    button.addEventListener('click', () => { state.contextPickerSourceKey = group.key; state.contextPickerRole = 'compatible'; renderContextFilePicker(); });
+    sourceTabs.appendChild(button);
+  }
+  const currentDirectory = contextPickerCurrentDirectory(active);
+  const rootCrumb = document.createElement('span'); rootCrumb.textContent = state.language === 'en' ? 'Workspace' : '工作区'; breadcrumb.appendChild(rootCrumb);
+  const crumbParts = [active.label, ...currentDirectory.split('/').filter(Boolean)];
+  for (const [index, part] of crumbParts.entries()) {
+    const separator = document.createElement('i'); separator.textContent = '›'; breadcrumb.appendChild(separator);
+    const button = document.createElement('button'); button.type = 'button'; button.textContent = part;
+    const targetDirectory = index === 0 ? '' : crumbParts.slice(1, index + 1).join('/');
+    button.className = index === crumbParts.length - 1 ? 'current' : '';
+    button.addEventListener('click', () => setContextPickerDirectory(active, targetDirectory));
+    breadcrumb.appendChild(button);
+  }
+  const definitions = contextPickerRoleDefinitions(active.files);
+  if (!definitions.some(entry => entry.id === state.contextPickerRole && entry.count)) state.contextPickerRole = definitions.find(entry => entry.count)?.id || 'all';
+  const activeDefinition = definitions.find(entry => entry.id === state.contextPickerRole) || definitions[0];
+  const navTitle = document.createElement('strong'); navTitle.textContent = state.language === 'en' ? 'Quick access' : '快速访问'; navigation.appendChild(navTitle);
+  for (const entry of definitions) {
+    if (!entry.count && !['all','unknown'].includes(entry.id)) continue;
+    const button = document.createElement('button'); button.type = 'button'; button.className = entry.id === state.contextPickerRole ? 'active' : '';
+    const label = document.createElement('span'); label.textContent = entry.label;
+    const count = document.createElement('em'); count.textContent = String(entry.count);
+    button.append(label, count);
+    button.addEventListener('click', () => { state.contextPickerRole = entry.id; renderContextFilePicker(); });
+    navigation.appendChild(button);
+  }
+  const query = String($('contextPickerSearch')?.value || '').trim().toLowerCase();
+  const matching = active.files.filter(file => {
+    const haystack = `${file.name} ${file.sample || file.auto_sample || ''} ${datasetRoleLabel(file.role)}`.toLowerCase();
+    return activeDefinition.matches(file) && (!query || haystack.includes(query));
+  });
+  const visible = [];
+  const folders = new Map();
+  for (const file of matching) {
+    const relativePath = contextPickerRelativePath(file, active);
+    if (query) {
+      visible.push(file);
+      continue;
+    }
+    const prefix = currentDirectory ? `${currentDirectory}/` : '';
+    if (prefix && !relativePath.startsWith(prefix)) continue;
+    const remainder = prefix ? relativePath.slice(prefix.length) : relativePath;
+    const parts = remainder.split('/').filter(Boolean);
+    if (parts.length > 1) {
+      const name = parts[0];
+      const path = currentDirectory ? `${currentDirectory}/${name}` : name;
+      if (!folders.has(path)) folders.set(path, {name, path, count:0});
+      folders.get(path).count += 1;
+    } else if (parts.length === 1) {
+      visible.push(file);
+    }
+  }
+  for (const folder of [...folders.values()].sort((left, right) => left.name.localeCompare(right.name))) {
+    const row = document.createElement('button'); row.type = 'button'; row.className = 'context-picker-folder-row'; row.title = `${contextPickerPath(active.root)}/${folder.path}`;
+    const primary = document.createElement('span'); primary.className = 'context-picker-folder-primary';
+    const icon = document.createElement('span'); icon.className = 'context-picker-folder-icon'; icon.textContent = '▰';
+    const name = document.createElement('strong'); name.textContent = folder.name; primary.append(icon, name);
+    const type = document.createElement('span'); type.textContent = state.language === 'en' ? 'Folder' : '文件夹';
+    const count = document.createElement('span'); count.textContent = state.language === 'en' ? `${folder.count} matching files` : `${folder.count} 个匹配文件`;
+    const action = document.createElement('span'); action.className = 'available'; action.textContent = state.language === 'en' ? 'Open' : '打开';
+    row.append(primary, type, count, action);
+    row.addEventListener('click', () => setContextPickerDirectory(active, folder.path));
+    list.appendChild(row);
+  }
+  if (!visible.length && !folders.size) {
+    const empty = document.createElement('div'); empty.className = 'context-picker-empty'; empty.textContent = state.language === 'en' ? 'No matching files.' : '没有符合条件的文件。'; list.appendChild(empty);
+  }
+  for (const file of visible) {
+    const selectable = contextFileIsSelectable(file);
+    const row = document.createElement('label'); row.className = `context-picker-row${state.contextDraftSelection?.has(datasetPathKey(file.path)) ? ' selected' : ''}${selectable ? '' : ' disabled'}`; row.title = file.path;
+    const primary = document.createElement('span'); primary.className = 'context-picker-primary';
+    const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.dataset.datasetPath = file.path; checkbox.checked = Boolean(state.contextDraftSelection?.has(datasetPathKey(file.path))); checkbox.disabled = !selectable;
+    const name = document.createElement('strong'); name.textContent = file.name; primary.append(checkbox, name);
+    const type = document.createElement('span'); type.textContent = datasetRoleLabel(file.role);
+    const sample = document.createElement('span'); sample.textContent = file.sample || file.auto_sample || '—';
+    const status = document.createElement('span'); status.className = selectable ? 'available' : 'unavailable'; status.textContent = contextPickerFileStatus(file);
+    checkbox.addEventListener('change', () => {
+      const key = datasetPathKey(file.path);
+      if (checkbox.checked) state.contextDraftSelection.add(key); else state.contextDraftSelection.delete(key);
+      syncContextPickerRows();
+      updateContextPickerCounts(visible.length + folders.size);
+    });
+    row.append(primary, type, sample, status); list.appendChild(row);
+  }
+  updateContextPickerCounts(visible.length + folders.size);
+}
+
+function openContextFilePicker() {
+  if (!contextUsableFiles().length) { openDataManagementDialog(); return; }
+  state.contextDraftSelection = new Set(contextSelectedDatasetPaths().map(datasetPathKey));
+  state.contextPickerRole = 'compatible';
+  $('contextPickerSearch').value = '';
+  renderContextFilePicker();
+  openDialog('contextFileDialog', 'contextPickerSearch');
+}
+
+function applyContextFileSelection() {
+  const selected = state.contextDraftSelection || new Set();
+  state.contextSelectedPaths = contextUsableFiles()
+    .filter(file => contextFileIsSelectable(file) && selected.has(datasetPathKey(file.path)))
+    .map(file => file.path);
+  closeDialog('contextFileDialog');
+  state.contextDraftSelection = null;
+  renderWorkspaceContext();
+}
+
+function applyContextSelectionToFigure(item=currentFigureTypeItem()) {
+  if (!item || !state.datasetScan) {
+    enforceDatasetSelectionForFigure(null, false);
+    return;
+  }
+  enforceDatasetSelectionForFigure(null, false);
+  const contextPaths = contextSelectedDatasetPaths();
+  const figurePaths = new Set(projectedDatasetPathsForFigure(item, contextPaths, contextPaths).map(datasetPathKey));
+  for (const input of document.querySelectorAll('#datasetFiles input[data-dataset-path]')) {
+    input.checked = !input.disabled && figurePaths.has(datasetPathKey(input.dataset.datasetPath));
+  }
+  enforceDatasetSelectionForFigure(null, false);
+}
+
+async function chooseContextFigure(item) {
+  if (!item?.ready) return;
+  const readiness = contextFigureAvailability(item);
+  if (!['ready', 'available'].includes(readiness.kind)) {
+    openContextFilePicker();
+    return;
+  }
+  if (item.selection_mode === 'conversation') {
+    openDialog('figureTypeDialog');
+    requestAnimationFrame(() => openWorkflowConfigurator(item, contextFigureLabel(item)));
+    return;
+  }
+  const select = $('figureTypeSelect');
+  if (![...select.options].some(option => option.value === item.id)) return;
+  select.value = item.id;
+  select.dispatchEvent(new Event('change', {bubbles:true}));
+  const contextPaths = contextSelectedDatasetPaths();
+  const workflowPaths = projectedDatasetPathsForFigure(item, contextPaths, contextPaths);
+  await startWorkflow(item, contextFigureLabel(item), workflowPaths);
+}
+
+function renderContextFigureTree() {
+  const target = $('contextFigureTree');
+  const counter = $('contextReadyCount');
+  if (!target || !counter) return;
+  target.replaceChildren();
+  if (!state.figureTypes.length) {
+    const empty = document.createElement('div'); empty.className = 'context-empty'; empty.textContent = state.language === 'en' ? 'Loading visualizations…' : '正在读取图形目录……'; target.appendChild(empty); return;
+  }
+  const labels = contextCategoryLabels();
+  const icons = {basic_hic:'▦', comparison:'⇄', compartment:'C', tad:'⌗', loop:'∞', pileup:'◉', tracks:'≋', differential:'±'};
+  const order = ['basic_hic','comparison','compartment','tad','loop','tracks','differential','pileup'];
+  const entries = state.figureTypes.map(item => ({item, availability:contextFigureAvailability(item)}));
+  const readyCount = entries.filter(entry => entry.availability.kind === 'ready').length;
+  const availableCount = entries.filter(entry => entry.availability.kind === 'available').length;
+  const generatableCount = readyCount + availableCount;
+  counter.textContent = state.language === 'en' ? `${generatableCount} can generate` : `${generatableCount} 种可生成`;
+  const selectedType = $('figureTypeSelect')?.value
+    || (state.session?.spec?.metadata?.draft ? '' : state.session?.spec?.figure_type)
+    || '';
+  let openedGeneratableGroup = false;
+  const addCategory = (category, categoryEntries, container, muted=false) => {
+    const rank = {ready:0, available:1, missing:2, unavailable:3};
+    if (!categoryEntries.length) return;
+    categoryEntries.sort((left, right) => rank[left.availability.kind] - rank[right.availability.kind] || contextFigureLabel(left.item).localeCompare(contextFigureLabel(right.item)));
+    const group = document.createElement('details'); group.className = 'context-figure-group';
+    const categoryReady = categoryEntries.filter(entry => ['ready','available'].includes(entry.availability.kind)).length;
+    group.classList.toggle('has-available', categoryReady > 0);
+    const containsCurrent = categoryEntries.some(entry => entry.item.id === selectedType);
+    group.open = containsCurrent || (!muted && !openedGeneratableGroup && categoryReady > 0);
+    if (group.open && categoryReady > 0) openedGeneratableGroup = true;
+    const summary = document.createElement('summary');
+    const categoryIcon = document.createElement('span'); categoryIcon.className = 'context-figure-category-icon'; categoryIcon.textContent = icons[category] || '◇';
+    const headingCopy = document.createElement('span'); headingCopy.className = 'context-figure-category-copy';
+    const heading = document.createElement('strong'); heading.textContent = labels[category] || category;
+    headingCopy.append(heading);
+    const groupStatus = document.createElement('span');
+    groupStatus.className = categoryReady ? 'category-ready-count' : 'category-missing-count';
+    groupStatus.textContent = state.language === 'en' ? `${categoryReady}/${categoryEntries.length}` : `${categoryReady}/${categoryEntries.length}`;
+    summary.append(categoryIcon, headingCopy, groupStatus); group.appendChild(summary);
+    const list = document.createElement('div'); list.className = 'context-figure-items';
+    for (const {item, availability} of categoryEntries) {
+      const button = document.createElement('button'); button.type = 'button';
+      button.className = `context-figure-item ${availability.kind}${item.id === selectedType ? ' current' : ''}`;
+      button.disabled = availability.kind === 'unavailable';
+      button.title = `${item.description || ''}${availability.detail ? `\n${availability.detail}` : ''}`;
+      const copy = document.createElement('span'); copy.className = 'context-figure-item-copy';
+      const name = document.createElement('strong'); name.textContent = contextFigureLabel(item);
+      const detail = document.createElement('small');
+      detail.textContent = ['ready', 'available'].includes(availability.kind) ? '' : (availability.detail || figureRequirementText(item));
+      if (!detail.textContent) detail.hidden = true;
+      const status = document.createElement('span'); status.className = 'context-figure-state'; status.textContent = availability.label;
+      copy.append(name, detail); button.append(copy, status);
+      button.addEventListener('click', () => chooseContextFigure(item));
+      list.appendChild(button);
+    }
+    group.appendChild(list); container.appendChild(group);
+  };
+  for (const category of order) {
+    addCategory(category, entries.filter(entry => entry.item.category === category && ['ready','available'].includes(entry.availability.kind)), target);
+  }
+  const remaining = entries.filter(entry => !['ready','available'].includes(entry.availability.kind));
+  if (remaining.length) {
+    const more = document.createElement('details'); more.className = 'context-figure-more';
+    more.open = remaining.some(entry => entry.item.id === selectedType);
+    const summary = document.createElement('summary');
+    summary.textContent = state.language === 'en'
+      ? `More visualizations · ${remaining.length} need data`
+      : `其他图形 · ${remaining.length} 种需补充数据`;
+    more.appendChild(summary);
+    for (const category of order) {
+      addCategory(category, remaining.filter(entry => entry.item.category === category), more, true);
+    }
+    target.appendChild(more);
+  }
+}
+
+function renderWorkspaceContext() {
+  if (!$('contextPane')) return;
+  renderContextFileBrowser();
+  renderContextFigureTree();
+  const summary = $('contextSelectionSummary');
+  const detail = $('contextSelectionDetail');
+  const files = state.datasetScan?.scan?.files || [];
+  const chosen = new Set(contextSelectedDatasetPaths().map(datasetPathKey));
+  const selected = files.filter(file => file.usable && chosen.has(datasetPathKey(file.path)));
+  if (!files.length) {
+    summary.textContent = state.language === 'en' ? 'No data imported' : '尚未导入数据';
+    detail.textContent = state.language === 'en' ? 'Import files to begin.' : '点击“管理数据”开始。';
+    return;
+  }
+  const usableCount = files.filter(file => file.usable).length;
+  const available = state.figureTypes.map(contextFigureAvailability);
+  const readyCount = available.filter(item => item.kind === 'ready').length;
+  const availableCount = available.filter(item => item.kind === 'available').length;
+  summary.textContent = state.language === 'en'
+    ? `${selected.length} files in analysis scope`
+    : `${selected.length} 个文件参与分析`;
+  detail.textContent = state.language === 'en'
+    ? `${usableCount} imported · ${readyCount} ready · ${availableCount} can auto-match`
+    : `已导入 ${usableCount} 个 · ${readyCount} 种可直接生成 · ${availableCount} 种可自动匹配`;
+}
+
+function workspaceContextForChat() {
+  const files = (state.datasetScan?.scan?.files || []).filter(file => file.usable);
+  const selected = new Set(contextSelectedDatasetPaths().map(datasetPathKey));
+  const current = new Set((state.session?.spec?.data_sources || []).map(source => datasetPathKey(source.path)));
+  const visualizations = state.figureTypes.map(item => {
+    const availability = contextFigureAvailability(item);
+    return {id:item.id, label:contextFigureLabel(item), category:item.category, status:availability.kind, missing:availability.kind === 'missing' ? availability.detail : null};
+  });
+  return {
+    displayed_preview:state.previewVersionId ? {session_id:state.previewSessionId, version_id:state.previewVersionId} : null,
+    reference_build:selectedReferenceBuild(),
+    requested_region:datasetRegionMode() === 'manual' ? $('datasetGene').value.trim() : null,
+    selected_figure_type:$('figureTypeSelect')?.value || null,
+    imported_sources:includedDatasetSources().map(source => ({label:datasetSourceLabel(source), file_count:(source.scan?.files || []).filter(file => file.usable).length})),
+    files:files.slice(0, 160).map(file => ({
+      name:file.name, role:file.role, type:file.type, sample:file.sample || file.auto_sample || null,
+      selected:selected.has(datasetPathKey(file.path)), in_current_figure:current.has(datasetPathKey(file.path)),
+      source:file.dataset_source_label || null, resolutions:Array.isArray(file.resolutions) ? file.resolutions.slice(0, 16) : [],
+    })),
+    visualizations,
+  };
+}
+
+function datasetSelectionForChat() {
+  if (!state.datasetScan) return null;
+  return {
+    dataset_path:state.datasetScan.path,
+    source_paths:state.datasetScan.sourcePaths || [state.datasetScan.path],
+    // Chat works from the persistent analysis scope in the right pane.  The
+    // current figure may use only a projection of that scope (for example one
+    // Hi-C matrix), so sending selectedDatasetPaths() here made follow-up
+    // requests lose files that the user had deliberately kept available.
+    selected_paths:contextSelectedDatasetPaths(),
+    reference_build:selectedReferenceBuild(),
+    file_overrides:fileOverridesPayload(),
+  };
 }
 function updateDirectFigureReadiness() {
   const select = $('figureTypeSelect');
@@ -594,7 +1267,10 @@ function updateDirectFigureReadiness() {
     const item = state.figureTypes.find(value => value.id === option.value);
     if (!item) return;
     const readiness = state.datasetScan ? workflowReadiness(item) : {ready:false, missing:''};
-    const projectedReadiness = state.datasetScan ? workflowReadiness(item, projectedDatasetPathsForFigure(item)) : readiness;
+    const contextPaths = state.datasetScan ? contextSelectedDatasetPaths() : [];
+    const projectedReadiness = state.datasetScan
+      ? workflowReadiness(item, projectedDatasetPathsForFigure(item, contextPaths, contextPaths))
+      : readiness;
     let availability = 'waiting';
     let availabilityLabel = t('figureWaitingData');
     let availabilityDetail = '';
@@ -709,17 +1385,17 @@ async function loadFigureTypes() {
     // Conversation workflows (for example tracks_integrated) are rendered by
     // the workflow list below, not by this direct-figure selector.  Do not
     // leave the native select visually blank when such a workflow is current.
-    const currentFigureType = state.session?.spec?.figure_type;
+    const currentFigureType = state.session?.spec?.metadata?.draft ? '' : state.session?.spec?.figure_type;
     const selectable = new Set(state.figureTypes.filter(value => value.selection_mode === 'direct').map(value => value.id));
     const selectedValue = selectable.has(currentFigureType)
       ? currentFigureType
-      : selectable.has(select.value) ? select.value : 'hic_triangle';
+      : selectable.has(select.value) ? select.value : '';
     select.replaceChildren();
     const categories = ['basic_hic', 'comparison', 'compartment', 'tad', 'loop', 'pileup'];
     const categoryLabels = state.language === 'en'
       ? {basic_hic:'Basic Hi-C', comparison:'Sample comparison', compartment:'Compartment', tad:'TAD', loop:'Loop', pileup:'Pileup'}
       : {basic_hic:'基础 Hi-C', comparison:'样本对比', compartment:'Compartment', tad:'TAD', loop:'Loop', pileup:'聚合分析'};
-    const englishLabels = {hic_triangle:'Triangular Hi-C heatmap',hic_square:'Square Hi-C heatmap',hic_oe:'Observed / Expected',hic_multi:'Two-sample square Hi-C comparison',hic_triangle_multi:'Two-sample triangular Hi-C comparison',compartment:'A/B compartment',compartment_eigenvector:'E1 eigenvector track',compartment_saddle:'Compartment saddle',tad_insulation:'TAD boundary region',tad_insulation_track:'Insulation score track',tad_boundary_square:'Square Hi-C + TAD boundaries',tad_boundary_pileup:'TAD boundary pileup',loop_heatmap:'Loop heatmap',loop_apa:'Loop APA'};
+    const englishLabels = {hic_triangle:'Triangular Hi-C heatmap',hic_square:'Square Hi-C heatmap',hic_multi:'Two-sample square Hi-C comparison',hic_triangle_multi:'Two-sample triangular Hi-C comparison',compartment:'A/B compartment',compartment_saddle:'Compartment saddle',tad_insulation:'TAD boundary region',tad_boundary_pileup:'TAD boundary pileup',loop_heatmap:'Loop heatmap',loop_apa:'Loop APA'};
     for (const category of categories) {
       const group = document.createElement('optgroup');
       group.label = categoryLabels[category];
@@ -734,12 +1410,12 @@ async function loadFigureTypes() {
       }
       if (group.children.length) select.appendChild(group);
     }
-    select.value = selectable.has(selectedValue) ? selectedValue : 'hic_triangle';
+    select.value = selectable.has(selectedValue) ? selectedValue : '';
     renderFigureTypeChoices();
     closeWorkflowConfigurator();
     const workflowList = $('workflowCatalog'); workflowList.replaceChildren();
     const workflowEnglish = {
-      hic_multi:'Two-sample Hi-C comparison',compartment_multi:'Multi-sample compartment comparison',compartment_eigenvector:'E1 eigenvector track',compartment_saddle:'Compartment saddle',tad_multi:'Multi-sample TAD comparison',tad_boundary_pileup:'TAD boundary pileup',loop_multi:'Multi-sample loop comparison',loop_apa_multi:'Multi-sample loop APA',tracks_integrated:'Integrated Hi-C multi-omics view',tracks_signal:'BigWig signal tracks',tracks_genes:'Gene annotation tracks',tracks_intervals:'BED interval tracks',tracks_mixed:'Mixed genomic tracks',compartment_diff_scatter:'Differential compartment scatter',tad_diff_stacked:'Differential TAD boundary classes',loop_diff_stacked:'Differential loop classes',compartment_diff_region:'Differential compartment regions',tad_diff_region:'Differential TAD regions',loop_diff_region:'Differential loop regions',tad_diff_pileup:'Differential TAD boundary pileup',loop_diff_apa:'Differential loop APA'
+      hic_multi:'Two-sample Hi-C comparison',compartment_multi:'Multi-sample compartment comparison',compartment_saddle:'Compartment saddle',tad_multi:'Multi-sample TAD comparison',tad_boundary_pileup:'TAD boundary pileup',loop_multi:'Multi-sample loop comparison',loop_apa_multi:'Multi-sample loop APA',tracks_integrated:'Integrated Hi-C multi-omics view',tracks_signal:'BigWig signal tracks',tracks_genes:'Gene annotation tracks',tracks_intervals:'BED interval tracks',tracks_mixed:'Mixed genomic tracks',compartment_diff_scatter:'Differential compartment scatter',tad_diff_stacked:'Differential TAD boundary classes',loop_diff_stacked:'Differential loop classes',compartment_diff_region:'Differential compartment regions',tad_diff_region:'Differential TAD regions',loop_diff_region:'Differential loop regions',tad_diff_pileup:'Differential TAD boundary pileup',loop_diff_apa:'Differential loop APA'
     };
     const workflowCategories = ['comparison','compartment','tad','loop','pileup','tracks','differential'];
     const workflowCategoryLabels = state.language === 'en'
@@ -860,7 +1536,7 @@ function openWorkflowConfigurator(item, displayLabel) {
   }
   const roles = workflowRelevantRoles(item);
   const candidates = files.filter(file => roles.has(file.role) && fileSupportsRole(file, file.role));
-  const globallySelected = new Set(selectedDatasetPaths().map(datasetPathKey));
+  const globallySelected = new Set(contextSelectedDatasetPaths().map(datasetPathKey));
   const contract = item.input_contract || {};
   const roleRules = contract.roles || {};
   const pairing = contract.pairing || null;
@@ -1076,6 +1752,10 @@ function openWorkflowConfigurator(item, displayLabel) {
   });
 }
 async function startWorkflow(item, displayLabel, workflowPaths=selectedDatasetPaths(), workflowBindings=[], pairingsConfirmed=false) {
+  if (!Array.isArray(workflowPaths) || workflowPaths.length === 0) {
+    openContextFilePicker();
+    return;
+  }
   const hint = $('workflowActionHint');
   if (!requireValidDatasetRegion()) {
     hint.textContent = datasetRegionError();
@@ -1194,11 +1874,11 @@ function updateFigureTypeHint() {
   if (item) {
     const english = {
       hic_triangle:'Triangular Hi-C contact map for regional chromatin structure.', hic_square:'Square Hi-C contact matrix.',
-      hic_oe:'Observed/expected contact enrichment map.', hic_multi:'Side-by-side square comparison of exactly two selected Hi-C samples.', hic_triangle_multi:'FOXJ1-style mirrored triangular comparison of exactly two selected Hi-C samples; tracks are optional.', compartment:'A/B compartment heatmap with the E1 track.',
-      compartment_eigenvector:'Standalone E1 compartment eigenvector track.', compartment_saddle:'A/B compartment interaction saddle plot.', tad_insulation:'Hi-C map with TAD/insulation annotations.', tad_insulation_track:'Standalone insulation-score curve and boundary marks.', tad_boundary_square:'Square Hi-C matrix with TAD boundary rows and columns.', tad_boundary_pileup:'Aggregate signal around TAD boundaries.', loop_heatmap:'Hi-C map with loop calls.', loop_apa:'Aggregate peak analysis of loop calls.'
+      hic_multi:'Side-by-side square comparison of exactly two selected Hi-C samples.', hic_triangle_multi:'FOXJ1-style mirrored triangular comparison of exactly two selected Hi-C samples; tracks are optional.', compartment:'A/B compartment heatmap with the E1 track.',
+      compartment_saddle:'A/B compartment interaction saddle plot.', tad_insulation:'Hi-C map with TAD/insulation annotations.', tad_boundary_pileup:'Aggregate signal around TAD boundaries.', loop_heatmap:'Hi-C map with loop calls.', loop_apa:'Aggregate peak analysis of loop calls.'
     };
     $('figureTypeHint').textContent = state.language === 'en' ? (english[item.id] || item.description) : item.description;
-  }
+  } else $('figureTypeHint').textContent = state.language === 'en' ? 'Choose a visualization to begin.' : '请选择要生成的图形。';
   syncFigureTypeTrigger();
 }
 async function api(path, options={}) {
@@ -1419,50 +2099,78 @@ function setApiConfigStatus(text, kind='') {
 }
 async function watchJob(job) {
   if (!job) return;
+  const previousPreviewVisible = !$('figureImage').hidden && Boolean($('figureImage').getAttribute('src'));
   state.activeJob = job.job_id;
+  state.activeJobInfo = null;
   updateDatasetSelectionSummary(false);
   $('previewQuality').hidden = true;
   for (const id of ['svgDownload','pngDownload','pdfDownload']) {
     $(id).href = '#'; $(id).classList.add('disabled');
   }
   state.renderStartedAt = Date.now();
-  setStatus(t('rendering'), 'running', state.language === 'en' ? 'Task submitted; waiting for the CFIZZ renderer…' : '任务已提交，正在等待绘图引擎……');
+  const saddle = state.session?.spec?.figure_type === 'compartment_saddle';
+  setStatus(t('rendering'), 'running', saddle
+    ? (state.language === 'en' ? 'Computing a genome-wide Saddle at the E1 resolution…' : '正在按 E1 分辨率计算全基因组 Saddle……')
+    : (state.language === 'en' ? 'Task submitted; waiting for the CFIZZ renderer…' : '任务已提交，正在等待绘图引擎……'));
+  updateRenderProgress(job);
+  const markPreviousPreview = (reason='failed') => {
+    if (!previousPreviewVisible) return;
+    $('previewQuality').textContent = reason === 'cancelled'
+      ? (state.language === 'en' ? 'Previous figure · new build cancelled' : '上一版本 · 新生成已取消')
+      : (state.language === 'en' ? 'Previous figure · latest build failed' : '上一版本 · 本次生成失败');
+    $('previewQuality').hidden = false;
+  };
   try {
     while (state.activeJob === job.job_id) {
       const current = await api(`/api/jobs/${job.job_id}`);
-      if (current.status === 'queued') setStatus(t('queued'), 'running', state.language === 'en' ? 'The task is queued and will start shortly.' : '任务已进入队列，即将开始。');
-      if (current.status === 'running') setStatus(t('drawing'), 'running', state.language === 'en' ? 'Reading region data, laying out tracks, and exporting files…' : '正在读取区域数据、布局轨道并导出图片……');
+      if (current.status === 'queued') setStatus(t('queued'), 'running', renderStageDetail('queued', current));
+      if (current.status === 'running') setStatus(t('drawing'), 'running', renderStageDetail(current.stage, current));
+      if (current.status === 'cancelling') setStatus(t('cancelling'), 'running', t('stoppingRender'));
+      updateRenderProgress(current);
       if (current.status === 'succeeded') {
         const png = current.artifact_urls.find(path => path.endsWith('.png'));
         const svg = current.artifact_urls.find(path => path.endsWith('.svg'));
         const pdf = current.artifact_urls.find(path => path.endsWith('.pdf'));
-        const preview = svg || png;
-        if (preview) {
-          const isVector = Boolean(svg);
-          $('figureImage').src = `${preview}?t=${Date.now()}`;
-          $('figureImage').classList.toggle('vector-preview', isVector);
-          $('figureImage').dataset.previewFormat = isVector ? 'svg' : 'png';
-          $('figureImage').hidden = false;
-          $('figurePreviewFrame').hidden = false;
-          $('figureZoomControl').hidden = false;
-          $('emptyState').hidden = true;
-          $('canvas').classList.remove('empty');
-          $('previewQuality').textContent = t(isVector ? 'vectorPreview' : 'rasterPreview');
-          $('previewQuality').hidden = false;
+        if (!png) {
+          throw new Error(state.language === 'en'
+            ? 'The renderer reported success but returned no PNG artifact.'
+            : '绘图引擎报告成功，但没有返回 PNG 产物。');
         }
+        $('figureImage').src = `${png}?t=${Date.now()}`;
+        $('figureImage').dataset.previewFormat = 'png';
+        state.previewSessionId = current.session_id;
+        state.previewVersionId = current.version_id;
+        $('figureImage').hidden = false;
+        $('figurePreviewFrame').hidden = false;
+        $('figureZoomControl').hidden = false;
+        $('emptyState').hidden = true;
+        $('canvas').classList.remove('empty');
+        $('previewQuality').textContent = `${t('rasterPreview')} · ${current.version_id}`;
+        $('previewQuality').hidden = false;
         if (svg) { $('svgDownload').href=svg; $('svgDownload').classList.remove('disabled'); }
-        if (png) { $('pngDownload').href=png; $('pngDownload').classList.remove('disabled'); }
+        $('pngDownload').href=png; $('pngDownload').classList.remove('disabled');
         if (pdf) { $('pdfDownload').href=pdf; $('pdfDownload').classList.remove('disabled'); }
         setStatus(t('completed'), 'success');
         $('canvas').classList.remove('just-completed'); void $('canvas').offsetWidth; $('canvas').classList.add('just-completed');
         state.activeJob=null;
+        state.activeJobInfo=null;
         updateDatasetSelectionSummary(false);
         return;
       }
       if (current.status === 'failed') {
         setStatus(t('failed'), 'failed');
         addMessage('assistant', current.error);
+        markPreviousPreview();
         state.activeJob=null;
+        state.activeJobInfo=null;
+        updateDatasetSelectionSummary(false);
+        return;
+      }
+      if (current.status === 'cancelled') {
+        markPreviousPreview('cancelled');
+        state.activeJob=null;
+        state.activeJobInfo=null;
+        setStatus(t('cancelled'), 'cancelled');
         updateDatasetSelectionSummary(false);
         return;
       }
@@ -1471,18 +2179,35 @@ async function watchJob(job) {
   } catch (error) {
     if (state.activeJob === job.job_id) {
       state.activeJob = null;
+      state.activeJobInfo = null;
       setStatus(t('failed'), 'failed');
       addMessage('assistant', error.message || (state.language === 'en' ? 'Could not read render status.' : '无法读取绘图任务状态。'));
+      markPreviousPreview();
       updateDatasetSelectionSummary(false);
     }
   }
 }
+async function cancelActiveRender() {
+  const jobId = state.activeJob;
+  if (!jobId) return;
+  const button = $('cancelRender');
+  button.disabled = true;
+  button.textContent = t('cancelling');
+  setStatus(t('cancelling'), 'running', t('stoppingRender'));
+  if (state.activeJobInfo) updateRenderProgress({...state.activeJobInfo, status:'cancelling', stage:'cancelling', cancellable:true});
+  try {
+    const current = await api(`/api/jobs/${jobId}/cancel`, {method:'POST'});
+    updateRenderProgress(current);
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = t('cancelRender');
+    addMessage('assistant', error.message || (state.language === 'en' ? 'Could not cancel the build.' : '无法取消当前绘图任务。'));
+  }
+}
+$('cancelRender').addEventListener('click', cancelActiveRender);
 $('chatTab').addEventListener('click', () => switchSidebar('chat'));
 $('settingsTab').addEventListener('click', () => switchSidebar('settings'));
-$('openDataDialog').addEventListener('click', () => {
-  openDialog('dataDialog', 'chooseLocalFiles');
-  updateDatasetRegionControl();
-});
+$('openDataDialog').addEventListener('click', openDataManagementDialog);
 $('chooseLocalFiles').addEventListener('click', () => $('localDatasetFiles').click());
 $('chooseLocalFolder').addEventListener('click', () => $('localDatasetFolder').click());
 $('localDatasetFiles').addEventListener('change', async event => {
@@ -1515,6 +2240,8 @@ document.querySelectorAll('dialog.settings-dialog').forEach(dialog => {
   });
   dialog.addEventListener('close', () => {
     if (dialog.id === 'figureTypeDialog') closeWorkflowConfigurator();
+    if (dialog.id === 'dataDialog') updateDatasetRegionControl();
+    if (dialog.id === 'contextFileDialog') state.contextDraftSelection = null;
     if (!document.querySelector('dialog[open]')) document.body.classList.remove('dialog-open');
   });
 });
@@ -1547,23 +2274,6 @@ $('dataForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   const path = $('dataPath').value.trim();
   if (!path) return;
-  if (/\.(?:m?cool)$/i.test(path)) {
-    if (!requireValidDatasetRegion()) return;
-    try {
-      setStatus('正在检查数据','running','正在读取文件元数据并选择合适的分辨率……');
-      const sessionId=`hic_${Date.now()}`;
-      const payload=await api('/api/sessions/from-hic',{method:'POST',body:JSON.stringify({session_id:sessionId,hic_path:path,region:datasetQuery(),reference_build:selectedReferenceBuild(),figure_type:$('figureTypeSelect').value})});
-      state.sessionId=payload.session_id; updateSession(payload);
-      $('chatInput').disabled=false; $('chatForm').querySelector('button').disabled=false;
-      const item = currentFigureTypeItem();
-      const fileName = path.split(/[\\/]/).pop();
-      addMessage('assistant', state.language === 'en'
-        ? `Creating: ${item?.label || payload.spec.title}\nHi-C: ${fileName}`
-        : `正在生成：${item?.label || payload.spec.title}\n使用 Hi-C：${fileName}`, 'data:file');
-      watchJob(payload.job);
-    } catch(error) { setStatus('数据不可用'); addMessage('assistant',error.message); }
-    return;
-  }
   await scanDatasetPath(path);
 });
 function datasetRoleLabel(role) {
@@ -1575,13 +2285,22 @@ function datasetRoleLabel(role) {
 function selectedDatasetPaths() {
   return [...document.querySelectorAll('#datasetFiles input[data-dataset-path]:checked')].map(input => input.dataset.datasetPath);
 }
-function projectedDatasetPathsForFigure(item) {
+function contextSelectedDatasetPaths() {
+  const files = contextUsableFiles();
+  const available = new Set(files.map(file => datasetPathKey(file.path)));
+  if (!Array.isArray(state.contextSelectedPaths)) state.contextSelectedPaths = selectedDatasetPaths();
+  state.contextSelectedPaths = state.contextSelectedPaths.filter(path => available.has(datasetPathKey(path)));
+  return [...state.contextSelectedPaths];
+}
+function projectedDatasetPathsForFigure(item, seedPaths=null, candidatePaths=null) {
+  const candidateKeys = Array.isArray(candidatePaths) ? new Set(candidatePaths.map(datasetPathKey)) : null;
   const files = (state.datasetScan?.scan?.files || []).filter(file => (
     file.usable
     && workflowRelevantRoles(item).has(file.role)
     && fileSupportsRole(file, file.role)
+    && (!candidateKeys || candidateKeys.has(datasetPathKey(file.path)))
   ));
-  const selected = new Set(selectedDatasetPaths().map(datasetPathKey));
+  const selected = new Set((seedPaths || selectedDatasetPaths()).map(datasetPathKey));
   let projected = files.filter(file => selected.has(datasetPathKey(file.path)));
   const contract = item?.input_contract || {};
   const anchorRole = contract.pairing?.anchor_role || 'hic';
@@ -1651,6 +2370,7 @@ function updateDatasetResolutionControl() {
   const shared = selectedCommonResolutions();
   if (!files.length || shared === null) {
     control.hidden = true;
+    select.disabled = false;
     return;
   }
   control.hidden = false;
@@ -1664,6 +2384,16 @@ function updateDatasetResolutionControl() {
     select.appendChild(option);
   }
   select.value = previous === 'auto' || shared.includes(Number(previous)) ? previous : 'auto';
+  if (isGenomeWideSaddle()) {
+    select.value = 'auto';
+    select.disabled = true;
+    hint.textContent = state.language === 'en'
+      ? 'Saddle resolution follows the selected E1 table automatically.'
+      : 'Saddle 分辨率由所选 E1 文件自动确定。';
+    hint.classList.remove('error');
+    return;
+  }
+  select.disabled = false;
   if (!shared.length) {
     hint.textContent = state.language === 'en'
       ? 'The checked Hi-C files have no shared resolution. Reduce the selection or add a matching matrix.'
@@ -1677,6 +2407,7 @@ function updateDatasetResolutionControl() {
   }
 }
 function selectedResolutionValue() {
+  if (isGenomeWideSaddle()) return null;
   const value = $('datasetResolutionSelect')?.value;
   return value && value !== 'auto' ? Number(value) : null;
 }
@@ -2016,6 +2747,7 @@ function renderCombinedDatasetWorkspace(focusedSource=null, fillMinimum=false) {
   const sources = includedDatasetSources();
   if (!sources.length) {
     state.datasetScan = null;
+    state.contextSelectedPaths = null;
     state.fileOverrides = {};
     const results = $('datasetResults');
     results.hidden = state.datasetSources.length === 0;
@@ -2106,6 +2838,7 @@ async function refreshDatasetSource(key) {
 }
 function clearDatasetWorkspace() {
   state.datasetScan = null;
+  state.contextSelectedPaths = null;
   state.activeDatasetKey = null;
   state.fileOverrides = {};
   $('datasetResults').hidden = true;
@@ -2166,7 +2899,7 @@ function updateDatasetSelectionSummary(schedulePreview=true) {
   const sharedResolutions = selectedCommonResolutions();
   // Capability comes from the CFIZZ catalogue.  Do not infer it from the
   // word "triangle": TAD integrated views can also accept tracks, while
-  // square/OE/compartment APIs intentionally do not.
+  // square/compartment APIs intentionally do not.
   const trackFigureSupported = item?.track_mode === 'integrated';
   const newTracks = newSelectedTrackFiles();
   const validHicCount = !rule || (selectedHics.length >= rule.min && (rule.max == null || selectedHics.length <= rule.max));
@@ -2401,7 +3134,7 @@ async function scanDatasetPath(path, options={}) {
   state.pendingDatasetPath = path;
   state.pendingDatasetOptions = {gene, geneInput, regionEdited, referenceBuild, refresh:Boolean(options.refresh)};
   const results = $('datasetResults');
-  const importButton = $('dataForm').querySelector('button[type="submit"]');
+  const importButton = $('dataImportButton');
   importButton.disabled = true;
   results.hidden = false;
   results.classList.remove('error');
@@ -2606,9 +3339,12 @@ $('buildDataset').addEventListener('click', async () => {
     $('chatInput').disabled = false; $('chatForm').querySelector('button').disabled = false;
     const spec = payload.spec;
     const region = `${spec.viewport.chrom}:${formatBp(spec.viewport.start)}–${formatBp(spec.viewport.end)}`;
+    const scope = spec.figure_type === 'compartment_saddle'
+      ? (state.language === 'en' ? 'Scope: genome-wide aggregate' : '范围：全基因组聚合')
+      : (state.language === 'en' ? `Region: ${region}` : `区域：${region}`);
     const message = state.language === 'en'
-      ? `Created: ${figureItem?.label || spec.title}\nHi-C: ${selectedHicNames.join(', ')}\nRegion: ${region}; resolution: ${formatBp(spec.analysis.resolution)} bp.${spec.metadata?.track_renderer_note ? `\n${spec.metadata.track_renderer_note}` : ''}`
-      : `已生成：${figureItem?.label || spec.title}\n使用 Hi-C：${selectedHicNames.join('、')}\n区域：${region}；分辨率：${formatBp(spec.analysis.resolution)} bp。${spec.metadata?.track_renderer_note ? `\n${spec.metadata.track_renderer_note}` : ''}`;
+      ? `Submitted: ${figureItem?.label || spec.title}\nHi-C: ${selectedHicNames.join(', ')}\n${scope}; resolution: ${formatBp(spec.analysis.resolution)} bp.${spec.metadata?.track_renderer_note ? `\n${spec.metadata.track_renderer_note}` : ''}`
+      : `已提交：${figureItem?.label || spec.title}\n使用 Hi-C：${selectedHicNames.join('、')}\n${scope}；分辨率：${formatBp(spec.analysis.resolution)} bp。${spec.metadata?.track_renderer_note ? `\n${spec.metadata.track_renderer_note}` : ''}`;
     addMessage('assistant', message, 'data:directory');
     watchJob(payload.job);
   } catch(error) {
@@ -2657,10 +3393,12 @@ $('chatForm').addEventListener('submit', async (event) => {
   try {
     await ensureChatSession();
     $('chatInput').value=''; addMessage('user',message);
-    let payload=await api(`/api/sessions/${state.sessionId}/chat`, {method:'POST',body:JSON.stringify({message,provider:state.provider})});
+    const workspaceContext = workspaceContextForChat();
+    const datasetSelection = datasetSelectionForChat();
+    let payload=await api(`/api/sessions/${state.sessionId}/chat`, {method:'POST',body:JSON.stringify({message,provider:state.provider,workspace_context:workspaceContext,dataset_selection:datasetSelection})});
     if(payload.intent.requires_confirmation && !payload.job) {
       const accepted=window.confirm(`${payload.intent.reply}\n\n这是科学参数修改，是否继续？`);
-      if(accepted) payload=await api(`/api/sessions/${state.sessionId}/chat`, {method:'POST',body:JSON.stringify({message,provider:state.provider,confirm_scientific_change:true})});
+      if(accepted) payload=await api(`/api/sessions/${state.sessionId}/chat`, {method:'POST',body:JSON.stringify({message,provider:state.provider,workspace_context:workspaceContext,dataset_selection:datasetSelection,confirm_scientific_change:true})});
       else { addMessage('assistant','已取消修改。'); return; }
     }
     addMessage('assistant',payload.intent.reply,payload.intent.planner); updateSession(payload); watchJob(payload.job);
@@ -2677,6 +3415,23 @@ async function historyAction(action) {
 }
 $('undoButton').addEventListener('click',()=>historyAction('undo'));
 $('redoButton').addEventListener('click',()=>historyAction('redo'));
+$('openContextDataDialog').addEventListener('click', openDataManagementDialog);
+$('openContextFileDialog').addEventListener('click', openContextFilePicker);
+$('contextPickerSearch').addEventListener('input', renderContextFilePicker);
+$('contextPickerRecommend').addEventListener('click', () => {
+  const recommended = contextUsableFiles().filter(contextFileIsSelectable).map(file => datasetPathKey(file.path));
+  state.contextDraftSelection = new Set(recommended);
+  renderContextFilePicker();
+});
+$('contextPickerSelectVisible').addEventListener('click', () => {
+  if (!state.contextDraftSelection) state.contextDraftSelection = new Set();
+  document.querySelectorAll('#contextPickerList input[data-dataset-path]:not(:disabled)').forEach(input => {
+    state.contextDraftSelection.add(datasetPathKey(input.dataset.datasetPath));
+  });
+  renderContextFilePicker();
+});
+$('contextPickerClear').addEventListener('click', () => { state.contextDraftSelection = new Set(); renderContextFilePicker(); });
+$('applyContextFileSelection').addEventListener('click', applyContextFileSelection);
 $('figureZoom').addEventListener('input', event => setFigureZoom(event.target.value));
 $('fitFigure').addEventListener('click', () => setFigureZoom(100));
 $('figureImage').addEventListener('load', scheduleFigureZoom);
@@ -2719,7 +3474,7 @@ $('removeApiConfig').addEventListener('click', async () => {
     setApiConfigStatus(state.language === 'en' ? 'API configuration cleared from server memory.' : 'API 配置已从服务端内存清除。', 'success');
   } catch(error) { setApiConfigStatus(error.message, 'error'); }
 });
-$('figureTypeSelect').addEventListener('change', () => { updateFigureTypeHint(); enforceDatasetSelectionForFigure(null, true); });
+$('figureTypeSelect').addEventListener('change', () => { updateFigureTypeHint(); applyContextSelectionToFigure(); updateDatasetRegionControl(); });
 $('datasetResolutionSelect').addEventListener('change', updateDatasetSelectionSummary);
 $('datasetRegionMode').addEventListener('change', () => {
   updateDatasetRegionControl();
@@ -2754,8 +3509,8 @@ $('applyFigureType').addEventListener('click', async () => {
       const chosen = new Set(selectedDatasetPaths());
       const hicNames = state.datasetScan.scan.files.filter(file => file.usable && file.role === 'hic' && chosen.has(file.path)).map(file => file.name);
       addMessage('assistant', state.language === 'en'
-        ? `Created: ${item?.label || figureType}\nHi-C: ${hicNames.join(', ')}`
-        : `已生成：${item?.label || figureType}\n使用 Hi-C：${hicNames.join('、')}`, 'data:directory');
+        ? `Submitted: ${item?.label || figureType}\nHi-C: ${hicNames.join(', ')}`
+        : `已提交：${item?.label || figureType}\n使用 Hi-C：${hicNames.join('、')}`, 'data:directory');
       watchJob(payload.job);
     } catch (error) {
       setStatus(state.language === 'en' ? 'Figure creation failed' : '图形生成失败', 'failed');
@@ -2775,7 +3530,13 @@ $('applyFigureType').addEventListener('click', async () => {
         {op:'update',target_kind:'figure',field:'workflow_options',value:{}}
       ]},render:true})
     });
-    addMessage('assistant', `已切换为${item.label}，区域、分辨率和数据源保持不变。`);
+    addMessage('assistant', figureType === 'compartment_saddle'
+      ? (state.language === 'en'
+          ? `Switched to ${item.label}. This is a genome-wide aggregate; the E1 grid will be used automatically.`
+          : `已切换为${item.label}。这是全基因组聚合分析，将自动采用 E1 文件的分辨率。`)
+      : (state.language === 'en'
+          ? `Switched to ${item.label}; region, resolution, and data sources are unchanged.`
+          : `已切换为${item.label}，区域、分辨率和数据源保持不变。`));
     updateSession(payload); watchJob(payload.job);
   } catch(error) { addMessage('assistant', error.message); }
   finally { finishDatasetAction(); }

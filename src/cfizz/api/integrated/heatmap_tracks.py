@@ -300,6 +300,7 @@ class HeatmapTracks:
             min_value=min_value,
             max_value=max_value,    # T-7.4 新加(跟 min_value 对称,不反转,跟现有 min_value 一致)
             tracks_kwargs=tracks_kwargs,
+            prepared_tracks=kwargs.get('prepared_tracks'),
             font_size=font_size,
         )
 
@@ -328,6 +329,7 @@ class HeatmapTracks:
         min_value=None,
         max_value=None,    # T-7.4 新加(跟 min_value 对称)
         tracks_kwargs=None,
+        prepared_tracks=None,
         font_size=5,
     ):
         """
@@ -385,7 +387,11 @@ class HeatmapTracks:
 
             # 创建 track
             try:
-                track = create_track(track_file, **tk)
+                track = (
+                    prepared_tracks[i]
+                    if prepared_tracks and i < len(prepared_tracks) and prepared_tracks[i] is not None
+                    else create_track(track_file, **tk)
+                )
             except Exception as e:
                 ax.text(
                     0.5, 0.5,

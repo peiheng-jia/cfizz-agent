@@ -312,6 +312,7 @@ class DataInspector:
         coordinate_rows = 0
         bedpe_coordinate_rows = 0
         bin_widths: set[int] = set()
+        bin_width_counts: Dict[int, int] = {}
         previous_end: Dict[str, int] = {}
         comparable_rows = 0
         contiguous_rows = 0
@@ -385,8 +386,12 @@ class DataInspector:
                         chromosomes.append(chrom)
                     min_start = start if min_start is None else min(min_start, start)
                     max_end = end if max_end is None else max(max_end, end)
-                    if end > start and len(bin_widths) < 64:
-                        bin_widths.add(end - start)
+                    if end > start:
+                        width = end - start
+                        if width in bin_width_counts or len(bin_width_counts) < 64:
+                            bin_width_counts[width] = bin_width_counts.get(width, 0) + 1
+                        if len(bin_widths) < 64:
+                            bin_widths.add(width)
                     if chrom in previous_end:
                         comparable_rows += 1
                         if previous_end[chrom] == start:
@@ -459,6 +464,14 @@ class DataInspector:
                 "coordinate_rows": coordinate_rows,
                 "bedpe_coordinate_rows": bedpe_coordinate_rows,
                 "bin_widths": sorted(bin_widths),
+                # Coordinate tables often contain a shorter final chromosome
+                # bin.  Preserve the modal width separately so workflows can
+                # align a matrix with the table's real grid before launching
+                # an expensive calculation.
+                "bin_size": (
+                    max(bin_width_counts, key=lambda value: (bin_width_counts[value], value))
+                    if bin_width_counts else None
+                ),
                 "contiguous_ratio": (contiguous_rows / comparable_rows) if comparable_rows else None,
                 "boundary_row_fraction": (
                     boundary_rows / boundary_observed_rows if boundary_observed_rows else None

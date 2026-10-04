@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .figure_spec import FigureSpecValidator, ValidationResult
 from .companions import companion_resolution, discover_companion, is_differential_tad_table
+from .insulation_windows import select_insulation_window
 from .parameters import (
     effective_workflow_options,
     layer_style_defaults,
@@ -17,7 +18,7 @@ from .parameters import (
 
 
 _WORKFLOW_FIGURE_TYPES = {
-    "hic_multi", "compartment_multi", "compartment_eigenvector",
+    "hic_multi", "compartment_multi",
     "compartment_saddle", "tad_multi", "tad_boundary_pileup",
     "loop_multi", "loop_apa_multi", "tracks_signal", "tracks_genes",
     "tracks_intervals", "tracks_mixed", "tracks_integrated", "compartment_diff_scatter",
@@ -172,7 +173,8 @@ class CfizzRenderAdapter:
         figure_type = resolved.get("figure_type", "hic_triangle")
         if figure_type in _WORKFLOW_FIGURE_TYPES:
             return self._build_workflow_request(
-                resolved, validation, sources, hic_layers, track_layers
+                resolved, validation, sources, hic_layers, track_layers,
+                inspect_files=inspect_files,
             )
 
         if not hic_layers:
@@ -215,11 +217,12 @@ class CfizzRenderAdapter:
                 if insulation_resolution:
                     discovered_resolutions.add(int(insulation_resolution))
                 tad_style = layer.setdefault("style", {})
+                window_size = select_insulation_window((insulation_path,), tad_style.get("window_size"))
                 tad_style.update({
                     "triangle_ratio": 1,
                     "flip_vertical": bool(index % 2),
                     "insulation_path": insulation_path,
-                    "window_size": tad_style.get("window_size", 100_000),
+                    "window_size": window_size,
                     "boundary_cmap": tad_style.get("boundary_cmap", "Blues_r"),
                     "boundary_alpha": tad_style.get("boundary_alpha", 0.9),
                 })
@@ -252,6 +255,12 @@ class CfizzRenderAdapter:
             return self._build_single_cooler_request(
                 resolved, validation, sources, hic_layers[0], figure_type, resolution
             )
+
+        # ``quick_plot_integrated`` accepts Loop and TAD annotations inside
+        # each Hi-C configuration.  Bind selected auxiliary files to those
+        # parameters even for a mixed-track figure: figure labels do not
+        # restrict capabilities of the underlying CFIZZ function.
+        self._bind_integrated_overlays(resolved, sources, hic_layers)
 
         hics = []
         for layer in hic_layers:
@@ -322,6 +331,61 @@ class CfizzRenderAdapter:
             validation=validation,
         )
 
+    def _bind_integrated_overlays(
+        self,
+        resolved: Dict[str, Any],
+        sources: Dict[str, Dict[str, Any]],
+        hic_layers: List[Dict[str, Any]],
+    ) -> None:
+        selected = set(resolved.get("workflow_source_ids") or [])
+        companions = [
+            source for source in sources.values()
+            if (not selected or source["id"] in selected)
+            and source.get("role") in {"loops", "insulation"}
+        ]
+        for layer in hic_layers:
+            hic_source = sources[layer["source_id"]]
+            hic_sample = re.sub(r"[^a-z0-9]+", "", str(hic_source.get("sample") or "").casefold())
+            style = layer.setdefault("style", {})
+            for role, key in (("loops", "loops_path"), ("insulation", "insulation_path")):
+                existing_path = style.get(key)
+                match = None
+                if not existing_path:
+                    candidates = [source for source in companions if source.get("role") == role]
+                    if not candidates:
+                        continue
+                    if len(hic_layers) == 1 and len(candidates) == 1:
+                        match = candidates[0]
+                    else:
+                        matches = [
+                            source for source in candidates
+                            if hic_sample and re.sub(r"[^a-z0-9]+", "", str(source.get("sample") or "").casefold()) == hic_sample
+                        ]
+                        if len(matches) != 1:
+                            raise ValueError(
+                                f"{hic_source.get('sample') or hic_source.get('label') or layer['id']} "
+                                f"无法唯一匹配 {role} 文件；请为每个 Hi-C 样本明确选择一份对应文件。"
+                            )
+                        match = matches[0]
+                raw_path = str(existing_path or match["path"])
+                source_path = str(self.validator.inspector.resolve_path(raw_path)) if self.validator.inspector else raw_path
+                if self.validator.inspector:
+                    report = self.validator.inspector.inspect(raw_path, match.get("type") if match else None)
+                    if not report.usable:
+                        raise ValueError(f"{Path(source_path).name} 无法读取：{report.error}")
+                    metadata = report.metadata
+                    if role == "loops" and (metadata.get("columns") or not metadata.get("bedpe_coordinate_rows")):
+                        raise ValueError(f"{Path(source_path).name} 缺少可用的无表头 BEDPE 六列坐标，不能作为 Loop 标注。")
+                    if role == "insulation":
+                        style["window_size"] = select_insulation_window((source_path,), style.get("window_size"))
+                    chroms = metadata.get("chromosomes") or []
+                    chrom = str(resolved["viewport"]["chrom"])
+                    if chroms and chrom not in chroms and (
+                        match is not None or resolved.get("figure_type") != "tad_insulation"
+                    ):
+                        raise ValueError(f"{Path(source_path).name} 没有当前区域的染色体 {chrom}。")
+                style[key] = source_path
+
     def _build_workflow_request(
         self,
         resolved: Dict[str, Any],
@@ -329,6 +393,8 @@ class CfizzRenderAdapter:
         sources: Dict[str, Dict[str, Any]],
         hic_layers: List[Dict[str, Any]],
         track_layers: List[Any],
+        *,
+        inspect_files: bool = True,
     ) -> RenderRequest:
         """Bind a registered workflow to one official public CFIZZ API."""
         figure_type = resolved["figure_type"]
@@ -503,8 +569,8 @@ class CfizzRenderAdapter:
                 "balance": common["balance"],
             }
         elif figure_type == "tad_multi":
-            if not hic_sources:
-                raise ValueError("TAD 对比需要至少一个 cool/mcool。")
+            if len(hic_sources) < 2:
+                raise ValueError("多样本 TAD 对比至少需要两个 cool/mcool 数据源。")
             explicit_insulations = typed("insulation_tsv")
             companions = []
             for source in hic_sources:
@@ -550,12 +616,44 @@ class CfizzRenderAdapter:
             # with “Interval length must match resolution”.
             if companion_resolutions:
                 common["resolution"] = companion_resolutions.pop()
-            entrypoint = "cfizz.api.plot_heatmap_with_tad_boundaries"
+            options = self._validated_workflow_options(
+                figure_type, resolved.get("workflow_options") or {}
+            )
+            layout = resolved["layout"]
+            hics = [
+                {
+                    "file": path(source),
+                    "name": sample_names[index],
+                    "cmap": options["cmap"],
+                    "color_scale": options["color_scale"],
+                    "triangle_ratio": options["triangle_ratio"],
+                    "flip_vertical": bool(index % 2),
+                    "balance": common["balance"],
+                    "resolution": common["resolution"],
+                    "insulation_path": insulation_paths[index],
+                    "boundary_cmap": options["boundary_cmap"],
+                    "boundary_alpha": options["boundary_alpha"],
+                }
+                for index, source in enumerate(hic_sources)
+            ]
+            entrypoint = "cfizz.api.quick_plot_integrated"
             kwargs = {
-                "mcool_paths": [path(item) for item in hic_sources],
-                "insulation_paths": insulation_paths, "sample_names": sample_names,
-                "output_path": output_prefix, **common, "dpi": export.get("dpi", 300),
+                "hics": hics,
+                "tracks": [],
+                "region": GenomeRange(common["chrom"], common["start"], common["end"]),
+                "output": output_prefix,
+                "n_tracks": 0,
+                "width_cm": layout.get("width_cm", 12),
+                "gap_cm": layout.get("gap_cm", 0.15),
+                "left_margin_cm": layout.get("left_margin_cm", 1.5),
+                "right_margin_cm": layout.get("right_margin_cm", 2),
+                "font_size": layout.get("font_size", 5),
+                "dpi": export.get("dpi", 300),
+                "formats": formats,
+                "resolution": common["resolution"],
+                "balance": common["balance"],
             }
+            kwargs.update({key: options[key] for key in ("vmin", "vmax") if options.get(key) is not None})
         elif figure_type in {"loop_multi", "loop_diff_region"}:
             if not hic_sources:
                 raise ValueError("Loop 区域对比需要 cool/mcool 数据源。")
@@ -624,37 +722,38 @@ class CfizzRenderAdapter:
         elif figure_type == "compartment_saddle":
             if not hic_sources:
                 raise ValueError("Compartment saddle 需要 cool/mcool 和 E1 数据。")
-            eig_paths = self._companions(hic_sources, path, "compartment")
+            explicit_eigs = typed("compartment_tsv")
+            if len(hic_sources) == 1 and len(explicit_eigs) == 1:
+                eig_paths = [path(explicit_eigs[0])]
+            elif explicit_eigs:
+                eig_paths = self._selected_companions(
+                    hic_sources, explicit_eigs, path, "E1"
+                )
+            else:
+                eig_paths = self._companions(hic_sources, path, "compartment")
+            common["resolution"] = self._saddle_resolution(
+                hic_sources,
+                explicit_eigs,
+                eig_paths,
+                path,
+                inspect_files=inspect_files,
+            )
             if len(hic_sources) == 1:
                 entrypoint = "cfizz.api.generate_single_saddle"
                 kwargs = {
                     "cool_file": self._cooler_uri(path(hic_sources[0]), hic_sources[0].get("type"), common["resolution"]), "eigenvector_file": eig_paths[0],
                     "output_dir": str(self.output_root), "sample_name": sample_names[0],
-                    "cache_dir": str(self.output_root / Path("cache")), "nproc": 1,
+                    "cache_dir": str(self.output_root.parent / Path(".saddle_cache")), "nproc": 1,
+                    "output_prefix": output_prefix,
                 }
             else:
                 entrypoint = "cfizz.api.generate_multi_saddle"
                 kwargs = {
                     "cool_files": [self._cooler_uri(path(item), item.get("type"), common["resolution"]) for item in hic_sources],
                     "eigenvector_files": eig_paths, "output_dir": str(self.output_root),
-                    "sample_names": sample_names, "cache_dir": str(self.output_root / Path("cache")),
-                    "max_workers": 1, "nproc": 1,
+                    "sample_names": sample_names, "cache_dir": str(self.output_root.parent / Path(".saddle_cache")),
+                    "max_workers": 1, "nproc": 1, "output_prefix": output_prefix,
                 }
-            expected = []
-        elif figure_type == "compartment_eigenvector":
-            eig = typed("compartment_tsv")
-            if not eig and hic_sources:
-                eig_path = self._companions(hic_sources[:1], path, "compartment")[0]
-            elif eig:
-                eig_path = path(eig[0])
-            else:
-                raise ValueError("E1 特征向量轨道需要 E1 TSV。")
-            entrypoint = "cfizz.api.plot_eigenvector_from_file"
-            kwargs = {
-                "eigenvector_path": eig_path, "output": output_prefix,
-                "formats": tuple(formats), **{key: common[key] for key in ("chrom", "start", "end", "resolution")},
-                "dpi": export.get("dpi", 300),
-            }
         elif figure_type in {"tracks_signal", "tracks_genes", "tracks_intervals", "tracks_mixed"}:
             allowed = {
                 "tracks_signal": {"bigwig"}, "tracks_genes": {"gtf", "gff"},
@@ -739,7 +838,23 @@ class CfizzRenderAdapter:
                 "请提供目录扫描结果中要求的计算产物。"
             )
 
-        kwargs.update(self._validated_workflow_options(figure_type, resolved.get("workflow_options") or {}))
+        if figure_type == "tad_multi":
+            window_size = select_insulation_window(
+                (hic["insulation_path"] for hic in kwargs["hics"]),
+                (resolved.get("workflow_options") or {}).get("window_size"),
+            )
+            for hic in kwargs["hics"]:
+                hic["window_size"] = window_size
+        else:
+            kwargs.update(self._validated_workflow_options(figure_type, resolved.get("workflow_options") or {}))
+        if figure_type == "tad_diff_region":
+            window_size = select_insulation_window(
+                (hic["insulation_path"] for hic in kwargs["hics"]),
+                (resolved.get("workflow_options") or {}).get("window_size"),
+            )
+            kwargs["window_size"] = window_size
+            for hic in kwargs["hics"]:
+                hic["window_size"] = window_size
 
         return RenderRequest(
             entrypoint=entrypoint, kwargs=kwargs, output_prefix=output_prefix,
@@ -804,6 +919,90 @@ class CfizzRenderAdapter:
             result.append(selected_path)
         return result
 
+    def _table_grid_resolution(
+        self,
+        source: Optional[Dict[str, Any]],
+        source_path: str,
+        *,
+        inspect_files: bool,
+    ) -> Optional[int]:
+        """Resolve a result table's scientific bin width before rendering."""
+        declared: Optional[int] = None
+        if source is not None:
+            try:
+                candidate = int(source.get("resolution"))
+                if candidate > 0:
+                    declared = candidate
+            except (TypeError, ValueError):
+                pass
+        metadata: Dict[str, Any] = {}
+        inspector = self.validator.inspector
+        if inspector is not None and (inspect_files or Path(source_path).exists()):
+            try:
+                inspected = inspector.inspect(
+                    source_path,
+                    (source or {}).get("type") or "compartment_tsv",
+                )
+                if inspected.usable:
+                    metadata = inspected.metadata
+            except (OSError, PermissionError, ValueError):
+                metadata = {}
+        inspected_resolution = companion_resolution(source_path, metadata)
+        return inspected_resolution or declared
+
+    def _saddle_resolution(
+        self,
+        hic_sources: List[Dict[str, Any]],
+        eigenvector_sources: List[Dict[str, Any]],
+        eigenvector_paths: List[str],
+        path_getter: Callable[[Dict[str, Any]], str],
+        *,
+        inspect_files: bool,
+    ) -> int:
+        """Use the E1 grid for Saddle and reject incompatible matrices early."""
+
+        def path_key(value: str) -> str:
+            return str(Path(value).expanduser().resolve()).casefold()
+
+        source_by_path = {
+            path_key(path_getter(source)): source for source in eigenvector_sources
+        }
+        resolutions: List[int] = []
+        for eigenvector_path in eigenvector_paths:
+            resolution = self._table_grid_resolution(
+                source_by_path.get(path_key(eigenvector_path)),
+                eigenvector_path,
+                inspect_files=inspect_files,
+            )
+            if not resolution:
+                raise ValueError(
+                    f"无法确定 E1 文件 {Path(eigenvector_path).name} 的分辨率；"
+                    "请使用包含 chrom/start/end/E1 的等宽分箱表。"
+                )
+            resolutions.append(int(resolution))
+        unique = sorted(set(resolutions))
+        if len(unique) != 1:
+            values = "、".join(f"{value:,} bp" for value in unique)
+            raise ValueError(f"所选 E1 文件的分辨率不一致（{values}），不能生成 Compartment Saddle。")
+        resolution = unique[0]
+
+        inspector = self.validator.inspector
+        if inspector is not None and inspect_files:
+            for hic_source in hic_sources:
+                hic_path = path_getter(hic_source)
+                inspected = inspector.inspect(hic_path, hic_source.get("type"))
+                available = [
+                    int(value) for value in inspected.metadata.get("resolutions", [])
+                    if str(value).isdigit()
+                ]
+                if available and resolution not in available:
+                    choices = "、".join(f"{value:,} bp" for value in available)
+                    raise ValueError(
+                        f"E1 使用 {resolution:,} bp，但 {Path(hic_path).name} 不包含该分辨率；"
+                        f"矩阵可用分辨率为：{choices}。"
+                    )
+        return resolution
+
     @staticmethod
     def _validated_workflow_options(figure_type: str, options: Dict[str, Any]) -> Dict[str, Any]:
         """Validate against the authoritative parameter registry."""
@@ -815,14 +1014,38 @@ class CfizzRenderAdapter:
             return f"{path}::/resolutions/{resolution}"
         return path
 
-    def render(self, spec: Dict[str, Any], inspect_files: bool = True) -> RenderResult:
+    def render(
+        self,
+        spec: Dict[str, Any],
+        inspect_files: bool = True,
+        progress_callback: Optional[Callable[[str, int], None]] = None,
+    ) -> RenderResult:
+        def progress(stage: str, value: int) -> None:
+            if progress_callback is not None:
+                progress_callback(stage, value)
+
+        progress("validating_inputs", 6)
         request = self.build_request(spec, inspect_files=inspect_files)
+        progress("loading_renderer", 18)
         self.output_root.mkdir(parents=True, exist_ok=True)
         try:
             renderer = self.renderer or self._load_renderer(request.entrypoint)
-            renderer(**request.kwargs)
+            figure_type = str(spec.get("figure_type") or "")
+            if figure_type == "compartment_saddle":
+                progress("aggregating_contacts", 25)
+            elif figure_type in _WORKFLOW_FIGURE_TYPES:
+                progress("running_analysis", 25)
+            else:
+                progress("reading_and_rendering", 25)
+            renderer_result = renderer(**request.kwargs)
         except Exception as exc:
             return RenderResult(False, [], request, f"绘图失败：{exc}")
+        progress("verifying_outputs", 94)
+        if isinstance(renderer_result, dict) and str(renderer_result.get("status", "")).casefold() in {
+            "error", "failed", "failure",
+        }:
+            detail = renderer_result.get("error") or renderer_result.get("message") or "绘图接口返回失败状态。"
+            return RenderResult(False, [], request, f"绘图失败：{detail}")
         artifacts = [path for path in request.expected_artifacts if Path(path).exists()]
         if not request.expected_artifacts:
             # CFIZZ differential-analysis APIs create a documented result
@@ -831,10 +1054,13 @@ class CfizzRenderAdapter:
                 str(path) for path in self.output_root.rglob("*")
                 if path.is_file() and path.suffix.lower() in {".svg", ".png", ".pdf"}
             )
+            if not artifacts:
+                return RenderResult(False, [], request, "绘图过程结束，但没有生成任何 SVG、PNG 或 PDF 文件。")
         missing = [path for path in request.expected_artifacts if path not in artifacts]
         if missing:
             names = ", ".join(Path(path).name for path in missing)
             return RenderResult(False, artifacts, request, f"绘图过程结束，但没有生成预期文件：{names}")
+        progress("publishing_artifacts", 98)
         return RenderResult(True, artifacts, request)
 
     def _build_single_cooler_request(
@@ -848,12 +1074,9 @@ class CfizzRenderAdapter:
     ) -> RenderRequest:
         entrypoints = {
             "hic_square": "cfizz.api.plot_hic_square",
-            "hic_oe": "cfizz.api.plot_hic_oe",
             "compartment": "cfizz.api.plot_hic_compartment",
             "loop_heatmap": "cfizz.api.plot_hic_loops",
             "loop_apa": "cfizz.api.plot_hic_loop_apa",
-            "tad_insulation_track": "cfizz.api.plot_tad_insulation_track",
-            "tad_boundary_square": "cfizz.api.plot_hic_tad_square",
         }
         if figure_type not in entrypoints:
             raise ValueError(f"图类型 {figure_type!r} 尚未接入渲染器。")
@@ -862,13 +1085,11 @@ class CfizzRenderAdapter:
         viewport = resolved["viewport"]
         companion_path = None
         oe_companion_path = None
-        if figure_type in {"compartment", "loop_heatmap", "loop_apa", "tad_insulation_track", "tad_boundary_square"}:
+        if figure_type in {"compartment", "loop_heatmap", "loop_apa"}:
             source_types = {
                 "compartment": {"compartment_tsv", "tsv"},
                 "loop_heatmap": {"loop_tsv", "bedpe"},
                 "loop_apa": {"loop_tsv", "bedpe"},
-                "tad_insulation_track": {"insulation_tsv"},
-                "tad_boundary_square": {"tad_tsv", "tsv"},
             }
             explicit = next((item for item in sources.values() if item.get("type") in source_types[figure_type] and item["id"] != source["id"]), None)
             if explicit:
@@ -877,16 +1098,12 @@ class CfizzRenderAdapter:
             else:
                 kind = (
                     "compartment" if figure_type == "compartment"
-                    else "insulation" if figure_type == "tad_insulation_track"
-                    else "boundaries" if figure_type == "tad_boundary_square"
                     else "loops"
                 )
                 companion = discover_companion(source_path, kind)
                 if companion is None:
                     requirement = (
                         "预计算 E1 TSV" if kind == "compartment"
-                        else "CFIZZ Insulation TSV" if kind == "insulation"
-                        else "CFIZZ Boundaries TSV" if kind == "boundaries"
                         else "Loop BEDPE/TSV"
                     )
                     raise ValueError(f"未找到与 {Path(source_path).name} 匹配的{requirement}；请把配套文件放在样本目录或 output 目录。")
@@ -903,12 +1120,11 @@ class CfizzRenderAdapter:
         output_prefix = str(self.output_root / output_basename)
         formats = export.get("formats", ["svg", "png", "pdf"])
         hic_style = hic_layer.get("style", {})
-        default_cmap = "RdBu_r" if figure_type == "hic_oe" else "Reds"
-        cmap = hic_style.get("cmap", default_cmap)
+        cmap = hic_style.get("cmap", "Reds")
         if figure_type == "compartment" and cmap == "Reds" and "positive_color" not in hic_style:
             cmap = None  # Preserve cfizz.viz.compartment's canonical blue-white-red default.
-        default_vmin = -2 if figure_type == "compartment" else 0.25 if figure_type == "hic_oe" else None
-        default_vmax = 2 if figure_type == "compartment" else 4 if figure_type == "hic_oe" else None
+        default_vmin = -2 if figure_type == "compartment" else None
+        default_vmax = 2 if figure_type == "compartment" else None
         return RenderRequest(
             entrypoint=entrypoints[figure_type],
             kwargs={

@@ -70,7 +70,7 @@ def quick_plot_integrated(
     n_tracks : int, default 2
         Number of tracks to display.
     track_heights_cm : List[float], optional
-        Height of each track in centimeters.
+        Minimum height in centimeters. GTF tracks grow to fit packed gene rows.
     width_cm : float, default 5.0
         Core width in centimeters.
     gap_cm : float, default 0.1
@@ -264,6 +264,38 @@ def quick_plot_integrated(
         raise ValueError(
             f"Length of track_heights_cm ({len(track_heights_cm)}) must match n_tracks ({n_tracks})"
         )
+    else:
+        track_heights_cm = list(track_heights_cm)
+
+    # GTF labels keep their configured font size.  Reserve enough real canvas
+    # height for the rows before calculating the integrated figure layout.
+    if region is not None and n_tracks:
+        from pathlib import Path
+        from cfizz.api.integrated.tracks.simple import SimpleTrack, TrackConfig
+
+        prepared_tracks = [None] * n_tracks
+        config_keys = set(TrackConfig.__dataclass_fields__) - {'file', 'type'}
+        track_configs = tracks if tracks is not None else [{'file': file} for file in track_files_out]
+        for index, config in enumerate(track_configs):
+            file_name = str(config['file'])
+            is_gtf = config.get('type') == 'gtf' or Path(file_name).name.lower().endswith(('.gtf', '.gtf.gz', '.gff', '.gff3'))
+            if not is_gtf:
+                continue
+            settings = {key: value for key, value in config.items() if key in config_keys}
+            settings.setdefault('fontsize', kwargs.get('font_size', 5))
+            if track_colors and index < len(track_colors):
+                settings['color'] = track_colors[index]
+            if track_names and index < len(track_names):
+                settings['name'] = track_names[index]
+            try:
+                track = SimpleTrack(file_name, 'gtf', **settings)
+            except Exception:
+                continue  # The renderer will show its normal file-error placeholder.
+            prepared_tracks[index] = track
+            track_heights_cm[index] = track.required_height_cm(
+                region, width_cm, track_heights_cm[index],
+            )
+        all_kwargs['prepared_tracks'] = prepared_tracks
 
     # 6. Calculate layout
     n_hics = len(hics_files)

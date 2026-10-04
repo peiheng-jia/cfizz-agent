@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .capabilities import CapabilityCall, CapabilityRegistry
 from .intent import IntentResult, SimpleIntentInterpreter
 from .parameters import ParameterCatalog, ParameterEdit
-from .figure_types import FIGURE_TYPE_BY_ID, figure_type_catalog
+from .figure_types import FIGURE_TYPE_BY_ID, figure_type_catalog, function_catalog
 
 
 Action = Literal["patch", "clarify", "answer", "undo", "redo", "render", "reference", "workflow"]
@@ -96,7 +96,7 @@ class PlannerOutput(BaseModel):
 
 
 class FigurePlanner(Protocol):
-    def interpret(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None) -> IntentResult:
+    def interpret(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None, workspace_context: Optional[Dict[str, Any]] = None) -> IntentResult:
         ...
 
     def status(self) -> Dict[str, Any]:
@@ -106,16 +106,25 @@ class FigurePlanner(Protocol):
 log = logging.getLogger(__name__)
 
 
+def _accepts_argument(method: Any, name: str) -> bool:
+    """Keep third-party/test planners compatible as context evolves."""
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.name == name or parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+
+
 @dataclass
 class RulePlanner:
     interpreter: SimpleIntentInterpreter
     reason: Optional[str] = None
 
-    def interpret(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None) -> IntentResult:
+    def interpret(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None, workspace_context: Optional[Dict[str, Any]] = None) -> IntentResult:
         return self.interpreter.interpret(message, spec)
 
-    async def interpret_async(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None) -> IntentResult:
-        return self.interpret(message, spec, history=history)
+    async def interpret_async(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None, workspace_context: Optional[Dict[str, Any]] = None) -> IntentResult:
+        return self.interpret(message, spec, history=history, workspace_context=workspace_context)
 
     def status(self) -> Dict[str, Any]:
         return {
@@ -147,26 +156,26 @@ class OpenAIPlanner:
             client = OpenAI(api_key=api_key)
         self.client = client
 
-    def interpret(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None) -> IntentResult:
-        response = self._request(message, spec, history=history)
+    def interpret(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None, workspace_context: Optional[Dict[str, Any]] = None) -> IntentResult:
+        response = self._request(message, spec, history=history, workspace_context=workspace_context)
         if inspect.isawaitable(response):
             raise RuntimeError("异步 OpenAI 客户端需要调用 interpret_async。")
         try:
             return self._compile_response(response, spec)
         except ValueError as exc:
-            repaired = self._request(message, spec, history=history, validation_feedback=_repair_feedback(exc))
+            repaired = self._request(message, spec, history=history, workspace_context=workspace_context, validation_feedback=_repair_feedback(exc))
             if inspect.isawaitable(repaired):
                 raise RuntimeError("异步 OpenAI 客户端需要调用 interpret_async。")
             return self._compile_response(repaired, spec)
 
-    async def interpret_async(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None) -> IntentResult:
-        response = self._request(message, spec, history=history)
+    async def interpret_async(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None, workspace_context: Optional[Dict[str, Any]] = None) -> IntentResult:
+        response = self._request(message, spec, history=history, workspace_context=workspace_context)
         if inspect.isawaitable(response):
             response = await response
         try:
             return self._compile_response(response, spec)
         except ValueError as exc:
-            repaired = self._request(message, spec, history=history, validation_feedback=_repair_feedback(exc))
+            repaired = self._request(message, spec, history=history, workspace_context=workspace_context, validation_feedback=_repair_feedback(exc))
             if inspect.isawaitable(repaired):
                 repaired = await repaired
             return self._compile_response(repaired, spec)
@@ -176,15 +185,18 @@ class OpenAIPlanner:
         message: str,
         spec: Dict[str, Any],
         history: Optional[List[Dict[str, str]]] = None,
+        workspace_context: Optional[Dict[str, Any]] = None,
         validation_feedback: Optional[str] = None,
     ):
         payload = {
             "request": public_dialogue_text(message),
             "recent_dialogue": public_dialogue_context(history or []),
             "current_figure": public_figure_context(spec),
+            "workspace_context": public_workspace_context(workspace_context or {}),
             "available_capabilities": CapabilityRegistry().model_catalog(),
             "editable_parameters": ParameterCatalog(spec).model_catalog(),
             "available_visualizations": figure_type_catalog(),
+            "available_functions": function_catalog(),
         }
         if validation_feedback:
             payload["previous_plan_error"] = validation_feedback
@@ -241,6 +253,7 @@ class DeepSeekPlanner(OpenAIPlanner):
         message: str,
         spec: Dict[str, Any],
         history: Optional[List[Dict[str, str]]] = None,
+        workspace_context: Optional[Dict[str, Any]] = None,
         validation_feedback: Optional[str] = None,
     ):
         schema = PlannerOutput.model_json_schema()
@@ -253,9 +266,11 @@ class DeepSeekPlanner(OpenAIPlanner):
             "request": public_dialogue_text(message),
             "recent_dialogue": public_dialogue_context(history or []),
             "current_figure": public_figure_context(spec),
+            "workspace_context": public_workspace_context(workspace_context or {}),
             "available_capabilities": CapabilityRegistry().model_catalog(),
             "editable_parameters": ParameterCatalog(spec).model_catalog(),
             "available_visualizations": figure_type_catalog(),
+            "available_functions": function_catalog(),
         }
         if validation_feedback:
             payload["previous_plan_error"] = validation_feedback
@@ -296,7 +311,7 @@ class RuleFirstPlanner:
         self.ai_planner = ai_planner
         self.rules = rules or SimpleIntentInterpreter()
 
-    def interpret(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None) -> IntentResult:
+    def interpret(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None, workspace_context: Optional[Dict[str, Any]] = None) -> IntentResult:
         direct = self._direct_answer(message)
         if direct is not None:
             return direct
@@ -304,11 +319,15 @@ class RuleFirstPlanner:
         if self._is_local_shortcut(message, local):
             return local
         try:
-            return self.ai_planner.interpret(message, spec, history=history)
+            method = self.ai_planner.interpret
+            kwargs: Dict[str, Any] = {"history": history}
+            if _accepts_argument(method, "workspace_context"):
+                kwargs["workspace_context"] = workspace_context
+            return method(message, spec, **kwargs)
         except Exception as exc:
             return self._fallback(local, exc)
 
-    async def interpret_async(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None) -> IntentResult:
+    async def interpret_async(self, message: str, spec: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None, workspace_context: Optional[Dict[str, Any]] = None) -> IntentResult:
         direct = self._direct_answer(message)
         if direct is not None:
             return direct
@@ -318,8 +337,15 @@ class RuleFirstPlanner:
         try:
             method = getattr(self.ai_planner, "interpret_async", None)
             if method is not None:
-                return await method(message, spec, history=history)
-            return self.ai_planner.interpret(message, spec, history=history)
+                kwargs: Dict[str, Any] = {"history": history}
+                if _accepts_argument(method, "workspace_context"):
+                    kwargs["workspace_context"] = workspace_context
+                return await method(message, spec, **kwargs)
+            sync_method = self.ai_planner.interpret
+            kwargs = {"history": history}
+            if _accepts_argument(sync_method, "workspace_context"):
+                kwargs["workspace_context"] = workspace_context
+            return sync_method(message, spec, **kwargs)
         except Exception as exc:
             return self._fallback(local, exc)
 
@@ -553,8 +579,10 @@ def public_figure_context(spec: Dict[str, Any]) -> Dict[str, Any]:
         source.get("id"): {
             "id": source.get("id"),
             "type": source.get("type"),
+            "role": source.get("role"),
             "sample": source.get("sample"),
             "label": source.get("label"),
+            "inspection": (spec.get("_source_inspections") or {}).get(source.get("id")),
         }
         for source in spec.get("data_sources", [])
         if isinstance(source, dict)
@@ -583,6 +611,7 @@ def public_figure_context(spec: Dict[str, Any]) -> Dict[str, Any]:
         "figure_type": spec.get("figure_type"),
         "viewport": spec.get("viewport", {}),
         "analysis": spec.get("analysis", {}),
+        "data_sources": list(sources.values()),
         # Workflow-level parameters are part of the model's semantic
         # context.  Without them a model can see that a Loop workflow exists
         # but cannot distinguish marker size from heatmap height or report
@@ -593,7 +622,94 @@ def public_figure_context(spec: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def public_dialogue_context(history: List[Dict[str, str]], limit: int = 6) -> List[Dict[str, str]]:
+def public_workspace_context(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a bounded, path-free inventory of the browser workspace.
+
+    This context is descriptive only.  It helps the planner distinguish
+    imported files, checked inputs and layers already present in the current
+    figure; render-time authorization and validation remain server-side.
+    """
+
+    if not isinstance(context, dict):
+        return {}
+
+    def clean(value: Any, limit: int = 240) -> Optional[str]:
+        if value is None:
+            return None
+        return public_dialogue_text(str(value))[:limit]
+
+    def clean_count(value: Any) -> int:
+        try:
+            return max(0, min(100000, int(value or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    files = []
+    for item in context.get("files", [])[:160]:
+        if not isinstance(item, dict):
+            continue
+        files.append({
+            "name": clean(item.get("name"), 260),
+            "role": clean(item.get("role"), 80),
+            "type": clean(item.get("type"), 80),
+            "sample": clean(item.get("sample"), 160),
+            "source": clean(item.get("source"), 160),
+            "selected": bool(item.get("selected")),
+            "in_current_figure": bool(item.get("in_current_figure")),
+            "resolutions": [value for value in item.get("resolutions", [])[:16] if isinstance(value, (int, float))],
+        })
+
+    visualizations = []
+    for item in context.get("visualizations", [])[:100]:
+        if not isinstance(item, dict):
+            continue
+        visualizations.append({
+            "id": clean(item.get("id"), 120),
+            "label": clean(item.get("label"), 160),
+            "category": clean(item.get("category"), 80),
+            "status": clean(item.get("status"), 40),
+            "missing": clean(item.get("missing"), 300),
+        })
+
+    sources = []
+    for item in context.get("imported_sources", [])[:24]:
+        if not isinstance(item, dict):
+            continue
+        sources.append({
+            "label": clean(item.get("label"), 160),
+            "file_count": clean_count(item.get("file_count")),
+        })
+
+    evidence = context.get("render_evidence") if isinstance(context.get("render_evidence"), dict) else {}
+    preview = context.get("displayed_preview") if isinstance(context.get("displayed_preview"), dict) else {}
+
+    return {
+        "reference_build": clean(context.get("reference_build"), 80),
+        "requested_region": clean(context.get("requested_region"), 160),
+        "selected_figure_type": clean(context.get("selected_figure_type"), 120),
+        "imported_sources": sources,
+        "files": files,
+        "visualizations": visualizations,
+        "render_evidence": {
+            "version_id": clean(evidence.get("version_id"), 40),
+            "figure_type": clean(evidence.get("figure_type"), 120),
+            "png_exists": bool(evidence.get("png_exists")),
+            "entrypoint": clean(evidence.get("entrypoint"), 160),
+            "source_labels": [clean(value, 160) for value in evidence.get("source_labels", [])[:12]],
+            "job_status": clean(evidence.get("job_status"), 40),
+            "job_error": clean(evidence.get("job_error"), 500),
+            "displayed_preview_version": clean(preview.get("version_id"), 40),
+        },
+        "semantics": {
+            "selected": "The user has checked this file as an input for the next figure.",
+            "in_current_figure": "This source is already present in the rendered/current FigureSpec.",
+            "status_ready": "The currently checked files satisfy this visualization.",
+            "status_available": "Matching imported files exist but are not all checked.",
+        },
+    }
+
+
+def public_dialogue_context(history: List[Dict[str, str]], limit: int = 20) -> List[Dict[str, str]]:
     """Return a short, path/key-redacted dialogue window for contextual planning."""
     result = []
     for item in history[-limit:]:
@@ -827,7 +943,7 @@ _SYSTEM_PROMPT = """你是 CFIZZ 科研图形规划器。把用户请求转换�
 14. recent_dialogue 是最近几轮脱敏对话。对于“还有呢”“除了这个呢”“换一个”“再浅一点”等省略表达，先结合 recent_dialogue 和 current_figure 恢复指代；只有仍存在多个合理目标时才追问。
 15. 区分询问与执行：用户询问“还能做什么/还有哪些/除了这个呢”时用 answer；只有明确要求改变当前图时才用 patch。
 16. 先理解整句意图，不要因为句中出现基因名或轨道名就改变区域。比如“MYC 标签重叠、看不清”是当前基因轨道的版式问题，应通过 editable_parameters 调整 genes 图层真实的 layer.height_cm；不要修改不会传给渲染器的注释面板高度。只有用户明确说“定位、跳转、切换到某基因附近”时才修改 viewport。
-17. 用户只要求某个轨道或基因标签的字体时，优先使用 editable_parameters 中该真实 layer ID 的 style.fontsize；要求整张图文字变化时，逐字选择目录中真实存在的 font_size 参数。多样本/工作流图通常使用 figure.workflow_options.font_size，不能改成不会传给该渲染器的 layout.font_size。
+17. 用户只要求某个轨道或基因标签的字体时，优先使用 editable_parameters 中该真实 layer ID 的 style.fontsize；要求整张图文字变化时，逐字选择目录中真实存在的 font_size 参数。TAD 多样本区域图使用 layout.font_size；其他工作流按各自参数目录选择，不能猜测不存在的 workflow_options.font_size。
 18. “最右侧标签截断、色标文字显示不全”通常是右侧留白不足，使用 set_layout_right_margin；左侧被裁切则使用 set_layout_left_margin。根据当前 margin 增加合理空间，不要修改数据区域。
 19. editable_parameters 含当前值、类型、范围和允许操作。对“再大一点/再小一点/隐藏/显示/换颜色/增加留白”等请求，直接使用通用 parameter_edits；不要因为没有专用 edit_type 而拒绝。
 20. 单基因注释轨道的数据源已经按 CFIZZ 示例预先提取为单基因 GTF。“只显示 MYC 基因”不需要隐藏任何图层；若当前基因轨道标签已经是 MYC，直接用 answer 说明已满足。必须保留 Hi-C 图层。
@@ -835,7 +951,13 @@ _SYSTEM_PROMPT = """你是 CFIZZ 科研图形规划器。把用户请求转换�
 22. 用户要求调整轨道顺序时使用 tracks.reorder：target 选择要移动的真实 layer，放到另一条轨道“上面/前面”时把该轨道 ID 填入 before_layer_id；要求放到“最后/最下面”时省略 before_layer_id。若用户说“放到 Y 下面”，应移动 Y 或把目标关系转换为合法的 before_layer_id，不能修改图层标签冒充排序。
 23. 涉及基因时先判断整句语义：只有用户明确要求定位某个基因、绘制/添加某个基因轨道，或绘制当前区域全部基因时，才使用 action=reference，并填写 reference_request。locate_gene 只定位区域；annotate_gene 定位并添加指定基因轨道；annotate_region_genes 显示当前区域全部基因。gene_symbol 只能填写用户实际提到的候选名称，绝不能生成基因坐标。用户询问“为什么基因文字在 Hi-C 图上”“这是什么基因”“某标签是否重叠”等属于问题或版式修改，不是 reference。Hi-C/HIC、ATAC、CTCF、RNA、BigWig、GTF 是数据或轨道类型，不能当成基因名称。基因名称和坐标最终由本地参考注释验证。
 24. 用户要求创建 available_visualizations 中 selection_mode=conversation 的图时，使用 action=workflow 并逐字填写该条目的 figure_type；source_ids 只能从 current_figure.data_sources 的真实 ID 中选择，options 只填写用户明确给出的科学参数。不要用普通 patch 假装已经完成。服务端会核对当前数据源并绑定正式 CFIZZ entrypoint，缺少数据时会明确向用户索取。
-25. 多样本工作流的正式参数位于 editable_parameters 中的 figure.workflow_options.*。Loop 圈/标记“太大、太小”只能修改 loop_multi/loop_diff_region 的 workflow_options.loop_size（或单样本 loop_heatmap 图层的 style.loop_size），绝不能用 triangle_ratio 代替；triangle_ratio 只表示三角热图高度。Loop 颜色和透明度分别使用 loop_color、loop_alpha。TAD 的 window_size 是 insulation 计算窗口，compartment 的 bar_height_ratio 是 E1 轨道高度；不要把这些参数互相替代。
+25. 多样本工作流的正式参数位于 editable_parameters 中的 figure.workflow_options.*。Loop 圈/标记“太大、太小”只能修改 loop_multi/loop_diff_region 的 workflow_options.loop_size（或单样本 loop_heatmap 图层的 style.loop_size），绝不能用 triangle_ratio 代替；triangle_ratio 只表示三角热图高度。Loop 颜色和透明度分别使用 loop_color、loop_alpha。TAD 的 window_size 选择 insulation 文件里已有的绝缘分数与边界列；如果目录给出 enum，只能选 enum 中的值，不得声称任意窗口都能直接重算。compartment 的 bar_height_ratio 是 E1 轨道高度；不要把这些参数互相替代。
 26. 用户说“缩小 Loop 圈”时，缩小的是 CFIZZ marker 的大小，不是热图、面板或三角形的高度；相对修改必须基于目录中的 current_value 生成合理的新值，并在 reply 中说明实际修改的参数名和前后值。涉及 window、flank、n_bins、contact_type 等科学计算参数时，说明会重新计算并等待服务端确认。
 27. action=patch 时至少提供一个 edit、parameter_edit 或 capability call。参数值必须遵守 editable_parameters 的类型与范围；若用户请求的纯视觉数值越界，使用最接近的合法值，并在 reply 中明确“请求值”和“实际应用值”，reply 必须与结构化参数一致。
+28. workspace_context 是当前浏览器工作区的结构化数据清单。必须严格区分：selected=true 表示用户已勾选为下一次绘图输入；in_current_figure=true 表示已经存在于当前图；两者都为 false 仍表示文件已导入且可以选择。不得把“当前图里没有”误说成“用户没有这个文件”，也不得让用户重新上传 workspace_context.files 中已经存在的文件。
+29. 用户说“这两个、第二个、都加上、它们”时，先结合 recent_dialogue 中最近明确提到的文件名，再结合 workspace_context.files 的 selected、sample 和 role 恢复指代。若两个同角色文件已经 selected=true，应默认用户指它们；只有候选仍不唯一时才提出一个具体澄清问题。
+30. BigWig/BED/GTF 等纯轨道工作流不要求 Hi-C。判断能否绘制时以 workspace_context.visualizations 的 status 和 available_visualizations.input_contract 为准；status=ready 表示当前勾选可生成，status=available 表示已导入文件可补选，status=missing 才是真正缺少输入。
+31. 回答当前数据或可画图形的问题时，优先引用 workspace_context 中真实的文件名、角色、勾选状态及可视化状态，并简洁说明“当前已选”“已导入但未选”“已在当前图”三者差别。不得臆造清单中不存在的数据。
+32. current_figure 只是当前版本的绘图配置，不代表 PNG 已经生成，也不能证明图片像素内容。涉及“画出来了吗”“当前画布是什么”“图与预期不一致”时先核对 workspace_context.render_evidence：png_exists=false 时必须说明当前版本无成功 PNG；job_status=failed 时报告 job_error；displayed_preview_version 与 version_id 不同时说明画布是旧版本。你是文本规划器，不能声称亲眼检查过 PNG。
+33. 规划绘图时按 available_visualizations 的 entrypoint、function_inputs 和 input_contract 判断能力；共享 cfizz.api.quick_plot_integrated 的 Hi-C 整合图支持 hics[*].loops_path 与 hics[*].insulation_path 同时叠加，并可保留 BigWig/GTF/BED 轨道。不要因为当前图类型叫 tracks_integrated 就声称不能添加 Loop/TAD。先查看 current_figure.data_sources[*].inspection 的列、窗口、BEDPE 坐标，再说明已有输入或具体缺口。没有绑定数据时不能声称已叠加成功。
 """

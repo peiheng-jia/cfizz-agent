@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CFIZZ Agent</title>
     <link rel="icon" type="image/png" href="/assets/cfizz-brand-mark.png?v=1">
-    <link rel="stylesheet" href="/assets/app.css?v=43">
+    <link rel="stylesheet" href="/assets/app.css?v=56">
 </head>
 <body>
   <main class="workspace">
@@ -71,7 +71,7 @@
           </dialog>
 
           <form id="dataForm" class="data-form">
-            <dialog id="dataDialog" class="settings-dialog" aria-labelledby="dataDialogTitle">
+            <dialog id="dataDialog" class="settings-dialog data-form" aria-labelledby="dataDialogTitle">
               <div class="dialog-shell">
                 <header class="dialog-header">
                   <div><h2 id="dataDialogTitle" data-i18n="importDataTitle">导入与管理数据</h2><p data-i18n="importDataHint">添加来源、设置绘图区域，并管理本次使用的数据。</p></div>
@@ -98,7 +98,7 @@
                   </div>
                   <details class="server-data-import">
                     <summary><span><strong data-i18n="serverImportTitle">使用服务器目录</strong><small data-i18n="serverImportHint">适合管理员或已经通过 SFTP 上传的数据。</small></span></summary>
-                    <div class="data-path-row"><input id="dataPath" placeholder="/data/sample.mcool 或 /data/case1" data-i18n-placeholder="dataPathPlaceholder"><button type="submit" data-i18n="load">导入数据源</button></div>
+                    <div class="data-path-row"><input id="dataPath" form="dataForm" placeholder="/data/sample.mcool 或 /data/case1" data-i18n-placeholder="dataPathPlaceholder"><button id="dataImportButton" type="submit" form="dataForm" data-i18n="load">导入数据源</button></div>
                   </details>
                   <div class="data-dialog-step region-step"><span>02</span><strong data-i18n="regionSettingsStep">设置绘图范围</strong></div>
                   <div class="dataset-options">
@@ -159,7 +159,7 @@
               </div>
             </section>
 
-            <dialog id="figureTypeDialog" class="settings-dialog figure-type-dialog" aria-labelledby="figureDialogTitle">
+            <dialog id="figureTypeDialog" class="settings-dialog figure-type-dialog data-form" aria-labelledby="figureDialogTitle">
               <div class="dialog-shell">
                 <header class="dialog-header">
                   <div><h2 id="figureDialogTitle" data-i18n="figureSelection">选择图形</h2><p data-i18n="figureSelectionHint">先选择基础图形；复杂分析可从下方工作流进入。</p></div>
@@ -232,8 +232,10 @@
             <div class="spinner" aria-hidden="true"></div>
             <strong id="renderTitle">正在生成图形</strong>
             <p id="renderDetail">正在准备数据与绘图参数……</p>
-            <div class="progress-track"><span></span></div>
-            <small id="renderElapsed">已用时 0 秒</small>
+            <div class="render-progress-heading"><span id="renderStage">准备任务</span><strong id="renderProgressText">约 0%</strong></div>
+            <div id="renderProgressTrack" class="progress-track" role="progressbar" aria-label="预计绘图进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="renderProgressBar"></span></div>
+            <div class="render-time-row"><small id="renderElapsed">已用时 0 秒</small><small id="renderEta">正在估算剩余时间</small></div>
+            <button id="cancelRender" class="render-cancel" type="button" data-i18n="cancelRender">取消生成</button>
           </div>
         </div>
       </div>
@@ -251,7 +253,7 @@
           <div class="figure-zoom-row">
             <input id="figureZoom" type="range" min="40" max="200" step="5" value="80">
             <output id="figureZoomValue" for="figureZoom" aria-live="polite">80%</output>
-            <button id="fitFigure" type="button" data-i18n="fitWindow">适应窗口</button>
+            <button id="fitFigure" type="button" data-i18n="fitWindow">适应宽度</button>
           </div>
         </div>
         <div class="download-group">
@@ -261,7 +263,78 @@
         </div>
       </footer>
     </section>
+
+    <aside id="contextPane" class="context-pane" aria-labelledby="contextPaneTitle">
+      <header class="context-pane-header">
+        <div>
+          <p class="eyebrow">WORKSPACE CONTEXT</p>
+          <h2 id="contextPaneTitle">数据与可视化</h2>
+        </div>
+        <button id="openContextDataDialog" type="button">管理数据</button>
+      </header>
+      <section class="context-selection" aria-live="polite">
+        <span>当前选择</span>
+        <strong id="contextSelectionSummary">尚未导入数据</strong>
+        <small id="contextSelectionDetail">导入数据后，Agent 会同步理解这里的文件与可用图形。</small>
+      </section>
+      <div class="context-pane-body">
+        <details class="context-section context-files" open>
+          <summary>
+            <span><strong>分析文件</strong><small>参与当前绘图规划</small></span>
+            <em id="contextFileCount">0</em>
+          </summary>
+          <div class="context-selected-toolbar">
+            <div><strong>已选择的文件</strong><small>按图形自动匹配输入</small></div>
+            <button id="openContextFileDialog" type="button">选择文件</button>
+          </div>
+          <div id="contextFileBrowser" class="context-file-browser">
+            <div class="context-empty">尚未选择文件</div>
+          </div>
+        </details>
+        <details class="context-section context-figures" open>
+          <summary>
+            <span><strong>可生成图形</strong><small>按当前数据筛选</small></span>
+            <em id="contextReadyCount">0 可生成</em>
+          </summary>
+          <div id="contextFigureTree" class="context-figure-tree">
+            <div class="context-empty">正在读取图形目录……</div>
+          </div>
+        </details>
+      </div>
+    </aside>
   </main>
-    <script src="/assets/app.js?v=75"></script>
+
+  <dialog id="contextFileDialog" class="settings-dialog context-file-dialog" aria-labelledby="contextFileDialogTitle">
+    <div class="dialog-shell">
+      <header class="dialog-header context-file-dialog-header">
+        <div><h2 id="contextFileDialogTitle">选择分析文件</h2><p>先选择要参与分析的数据，系统会据此判断可以生成哪些图形。</p></div>
+        <button type="button" class="dialog-close" data-dialog-close="contextFileDialog">关闭</button>
+      </header>
+      <div class="context-file-dialog-toolbar">
+        <label class="context-picker-search"><span>搜索</span><input id="contextPickerSearch" type="search" placeholder="输入文件名、样本或类型" aria-label="搜索文件名、样本或类型"></label>
+        <div class="context-picker-actions">
+          <button id="contextPickerRecommend" type="button">选择全部已识别</button>
+          <button id="contextPickerSelectVisible" type="button">全选当前列表</button>
+          <button id="contextPickerClear" type="button">清空</button>
+        </div>
+      </div>
+      <div class="context-picker-location">
+        <div id="contextPickerSourceTabs" class="context-picker-source-tabs"></div>
+        <div id="contextPickerBreadcrumb" class="context-picker-breadcrumb"></div>
+      </div>
+      <div class="context-picker-main">
+        <nav id="contextPickerRoles" class="context-picker-navigation" aria-label="文件分类"></nav>
+        <section class="context-picker-files" aria-label="文件列表">
+          <div class="context-picker-columns"><span>名称</span><span>类型</span><span>样本</span><span>状态</span></div>
+          <div id="contextPickerList" class="context-picker-list"></div>
+        </section>
+      </div>
+      <footer class="context-picker-footer">
+        <div><strong id="contextPickerSelectionCount">已选择 0 个文件</strong><small id="contextPickerVisibleCount">显示 0 个项目</small></div>
+        <div><button type="button" data-dialog-close="contextFileDialog">取消</button><button id="applyContextFileSelection" type="button" class="primary">应用选择</button></div>
+      </footer>
+    </div>
+  </dialog>
+    <script src="/assets/app.js?v=93"></script>
 </body>
 </html>

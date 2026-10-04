@@ -58,19 +58,15 @@ def _item(
 FIGURE_TYPES: List[Dict[str, Any]] = [
     _item("hic_triangle", "basic_hic", "三角 Hi-C 热图", "cfizz.api.quick_plot_integrated", mode="direct", available_from=("cool", "mcool"), description="使用一个明确选定的 Hi-C 样本绘制局部染色质互作三角热图；可在同一张图下方放置 CFIZZ 轨道。", track_mode="integrated"),
     _item("hic_square", "basic_hic", "方形 Hi-C 热图", "cfizz.api.plot_hic_square", mode="direct", available_from=("cool", "mcool"), description="标准方形接触矩阵。"),
-    _item("hic_oe", "basic_hic", "O/E 热图", "cfizz.api.plot_hic_oe", mode="direct", available_from=("cool", "mcool"), description="Observed/Expected 接触富集热图。"),
     _item("hic_multi", "comparison", "双样本方形 Hi-C 对比", "cfizz.api.generate_multi_heatmap", mode="direct", available_from=("cool", "mcool"), requires=("两个 cool/mcool",), hic_count=(2, 2), description="使用 CFIZZ 多样本矩阵接口，将两个明确勾选的 Hi-C 样本按同一区域进行方形矩阵比较；该官方接口不带轨道面板。"),
     _item("hic_triangle_multi", "comparison", "双样本三角 Hi-C 对比", "cfizz.api.quick_plot_integrated", mode="direct", available_from=("cool", "mcool"), requires=("两个 cool/mcool",), hic_count=(2, 2), description="使用 CFIZZ 官方整合接口，将两个明确勾选的 Hi-C 样本上下镜像绘制为 FOXJ1 示例风格的三角热图；可在下方放置轨道。", track_mode="integrated"),
 
     _item("compartment", "compartment", "A/B Compartment 区域图", "cfizz.api.plot_hic_compartment", mode="direct", available_from=("cool", "mcool"), requires=("E1 TSV",), description="区域 O/E 热图与 E1 轨道。"),
     _item("compartment_multi", "compartment", "多样本 Compartment 对比", "cfizz.api.generate_multi_compartment", mode="conversation", requires=("每个样本的 E1 TSV", "每个样本的 O/E NPY"), hic_count=(2, None), description="多样本 A/B compartment 与 E1 对齐比较。"),
-    _item("compartment_eigenvector", "compartment", "E1 特征向量轨道", "cfizz.api.plot_eigenvector_from_file", mode="direct", available_from=("cool", "mcool"), requires=("E1 TSV",), description="独立显示 compartment E1 特征向量。"),
     _item("compartment_saddle", "pileup", "Compartment Saddle", "cfizz.api.generate_multi_saddle", mode="direct", available_from=("cool", "mcool"), requires=("cool/mcool", "E1 TSV", "参考基因组/GC 校正"), description="A/B compartment 交互鞍形图，支持单样本和多样本。"),
 
     _item("tad_insulation", "tad", "TAD 边界区域图", "cfizz.api.quick_plot_integrated", mode="direct", available_from=("cool", "mcool"), requires=("Insulation TSV",), description="CFIZZ 三角 Hi-C 与 insulation/TAD 边界联合视图；也支持把已选轨道放在下方。", track_mode="integrated"),
-    _item("tad_insulation_track", "tad", "Insulation score 轨道", "cfizz.api.plot_tad_insulation_track", mode="direct", available_from=("cool", "mcool"), requires=("Insulation TSV",), description="独立绝缘分数曲线与边界标记。", track_mode="standalone"),
-    _item("tad_boundary_square", "tad", "方形 Hi-C + TAD 边界", "cfizz.api.plot_hic_tad_square", mode="direct", available_from=("cool", "mcool"), requires=("Boundaries TSV",), description="在方形接触矩阵中标记 TAD 边界行列。"),
-    _item("tad_multi", "tad", "多样本 TAD 边界对比", "cfizz.api.plot_heatmap_with_tad_boundaries", mode="conversation", requires=("多个 cool/mcool", "每个样本的 Insulation TSV"), hic_count=(2, None), description="每个样本绑定各自 insulation 结果的 TAD 区域对比。"),
+    _item("tad_multi", "tad", "多样本 TAD 边界对比", "cfizz.api.quick_plot_integrated", mode="conversation", requires=("多个 cool/mcool", "每个样本的 Insulation TSV"), hic_count=(2, None), description="每个样本绑定各自 insulation 结果，以整合视图显示上下对齐的三角 Hi-C 和 TAD 边界。"),
     _item("tad_boundary_pileup", "pileup", "TAD Boundary Pileup", "cfizz.api.plot_tad_boundary_pileup_from_files", mode="conversation", requires=("cool/mcool", "Boundaries TSV"), description="TAD 边界附近信号聚合，支持单样本和多样本。"),
 
     _item("loop_heatmap", "loop", "Loop 标注热图", "cfizz.api.plot_hic_loops", mode="direct", available_from=("cool", "mcool"), requires=("Loop BEDPE/TSV",), description="在 Hi-C 热图中标注 loop。"),
@@ -78,7 +74,7 @@ FIGURE_TYPES: List[Dict[str, Any]] = [
     _item("loop_apa", "pileup", "Loop APA", "cfizz.api.plot_hic_loop_apa", mode="direct", available_from=("cool", "mcool"), requires=("Loop BEDPE/TSV",), description="单样本 loop 中心聚合峰值图。"),
     _item("loop_apa_multi", "pileup", "多样本 Loop APA", "cfizz.api.plot_multi_apa_heatmap", mode="conversation", requires=("多个 cool/mcool", "Loop BEDPE/TSV"), hic_count=(2, None), description="多个样本的 loop 中心聚合比较。"),
 
-    _item("tracks_integrated", "tracks", "Hi-C 多组学整合图", "cfizz.api.quick_plot_integrated", mode="conversation", requires=("Hi-C", "BigWig/GTF/BED 中至少一种"), hic_count=(1, None), description="CFIZZ 官方整合接口：Hi-C 与 BigWig、基因、区间等轨道联合绘制。", track_mode="integrated"),
+    _item("tracks_integrated", "tracks", "Hi-C 多组学整合图", "cfizz.api.quick_plot_integrated", mode="conversation", requires=("Hi-C", "BigWig/GTF/BED 中至少一种"), hic_count=(1, None), description="CFIZZ 官方整合接口：Hi-C、BigWig/GTF/BED 轨道，以及可选的 Loop BEDPE 与 insulation/TAD 边界可在同一张图绘制。", track_mode="integrated"),
     _item("tracks_signal", "tracks", "BigWig 信号轨道图", "cfizz.api.plot_track_files", mode="conversation", requires=("BigWig",), description="一个或多个连续信号轨道。", track_mode="standalone"),
     _item("tracks_genes", "tracks", "基因注释轨道图", "cfizz.api.plot_track_files", mode="conversation", requires=("GTF/GFF",), description="CFIZZ 基因结构和标签轨道。", track_mode="standalone"),
     _item("tracks_intervals", "tracks", "BED 区间轨道图", "cfizz.api.plot_track_files", mode="conversation", requires=("BED",), description="增强子、peak 或其他区间注释轨道。", track_mode="standalone"),
@@ -118,6 +114,8 @@ _HIC_ONE = _role(1, 1, label="Hi-C")
 _HIC_TWO = _role(2, 2, label="Hi-C")
 _HIC_MULTI = _role(2, None, label="Hi-C")
 _OPTIONAL = _role(0, None, label="可选轨道")
+_OPTIONAL_LOOPS = _role(0, None, label="Loop BEDPE")
+_OPTIONAL_INSULATION = _role(0, None, label="Insulation TSV")
 _PAIR_INSULATION = {
     "anchor_role": "hic", "companion_roles": ["insulation"], "requires_confirmation": True,
 }
@@ -132,21 +130,17 @@ _PAIR_COMPARTMENT = {
 # remain explanatory only; no component is allowed to infer scientific input
 # roles by searching for words such as "TAD" or "Loop".
 INPUT_CONTRACTS: Dict[str, Dict[str, Any]] = {
-    "hic_triangle": _contract({"hic": _HIC_ONE, "signal": _OPTIONAL, "gene_annotation": _OPTIONAL, "intervals": _OPTIONAL}),
+    "hic_triangle": _contract({"hic": _HIC_ONE, "signal": _OPTIONAL, "gene_annotation": _OPTIONAL, "intervals": _OPTIONAL, "loops": _OPTIONAL_LOOPS, "insulation": _OPTIONAL_INSULATION}),
     "hic_square": _contract({"hic": _HIC_ONE}),
-    "hic_oe": _contract({"hic": _HIC_ONE}),
     "hic_multi": _contract({"hic": _HIC_TWO}),
-    "hic_triangle_multi": _contract({"hic": _HIC_TWO, "signal": _OPTIONAL, "gene_annotation": _OPTIONAL, "intervals": _OPTIONAL}),
+    "hic_triangle_multi": _contract({"hic": _HIC_TWO, "signal": _OPTIONAL, "gene_annotation": _OPTIONAL, "intervals": _OPTIONAL, "loops": _OPTIONAL_LOOPS, "insulation": _OPTIONAL_INSULATION}),
     "compartment": _contract({"hic": _HIC_ONE, "compartment": _role(1, 1, label="E1")}),
     "compartment_multi": _contract(
         {"hic": _HIC_MULTI, "compartment": _role(1, 1, label="E1", per_anchor=True), "oe": _role(1, 1, label="O/E", per_anchor=True)},
         pairing=_PAIR_COMPARTMENT,
     ),
-    "compartment_eigenvector": _contract({"hic": _HIC_ONE, "compartment": _role(1, 1, label="E1")}),
     "compartment_saddle": _contract({"hic": _role(1, None, label="Hi-C"), "compartment": _role(1, None, label="E1")}),
-    "tad_insulation": _contract({"hic": _HIC_ONE, "insulation": _role(1, 1, label="Insulation"), "signal": _OPTIONAL, "gene_annotation": _OPTIONAL, "intervals": _OPTIONAL}),
-    "tad_insulation_track": _contract({"hic": _HIC_ONE, "insulation": _role(1, 1, label="Insulation")}),
-    "tad_boundary_square": _contract({"hic": _HIC_ONE, "boundaries": _role(1, 1, label="TAD 边界")}),
+    "tad_insulation": _contract({"hic": _HIC_ONE, "insulation": _role(1, 1, label="Insulation"), "signal": _OPTIONAL, "gene_annotation": _OPTIONAL, "intervals": _OPTIONAL, "loops": _OPTIONAL_LOOPS}),
     "tad_multi": _contract(
         {"hic": _HIC_MULTI, "insulation": _role(1, 1, label="Insulation", per_anchor=True)},
         pairing=_PAIR_INSULATION,
@@ -163,7 +157,7 @@ INPUT_CONTRACTS: Dict[str, Dict[str, Any]] = {
         pairing=_PAIR_LOOPS,
     ),
     "tracks_integrated": _contract(
-        {"hic": _role(1, None, label="Hi-C"), "signal": _OPTIONAL, "gene_annotation": _OPTIONAL, "intervals": _OPTIONAL},
+        {"hic": _role(1, None, label="Hi-C"), "signal": _OPTIONAL, "gene_annotation": _OPTIONAL, "intervals": _OPTIONAL, "loops": _OPTIONAL_LOOPS, "insulation": _OPTIONAL_INSULATION},
         any_of=({"roles": ["signal", "gene_annotation", "intervals"], "min": 1},),
     ),
     "tracks_signal": _contract({"signal": _role(1, None, label="BigWig")}),
@@ -189,6 +183,15 @@ if set(INPUT_CONTRACTS) != {item["id"] for item in FIGURE_TYPES}:  # pragma: no 
     raise RuntimeError(f"CFIZZ input contracts mismatch; missing={sorted(missing)}, extra={sorted(extra)}")
 for _figure_item in FIGURE_TYPES:
     _figure_item["input_contract"] = INPUT_CONTRACTS[_figure_item["id"]]
+    if _figure_item["entrypoint"] == "cfizz.api.quick_plot_integrated":
+        _figure_item["function_inputs"] = {
+            "hics": ["cool", "mcool"],
+            "tracks": ["bigwig", "gtf", "gff", "bed"],
+            "hic_overlays": {
+                "loops_path": {"role": "loops", "format": "headerless BEDPE", "columns": ["chrom1", "start1", "end1", "chrom2", "start2", "end2"]},
+                "insulation_path": {"role": "insulation", "format": "TSV", "columns": ["chrom", "start", "end", "log2_insulation_score_<window>", "is_boundary_<window>"]},
+            },
+        }
     hic_rule = INPUT_CONTRACTS[_figure_item["id"]]["roles"].get("hic")
     if hic_rule:
         _figure_item["input_cardinality"] = {"hic": {"min": hic_rule["min"], "max": hic_rule["max"]}}
@@ -214,6 +217,39 @@ READY_FIGURE_TYPE_IDS = {
 
 def figure_type_catalog() -> List[Dict[str, Any]]:
     return [dict(item) for item in FIGURE_TYPES]
+
+
+_ROLE_FORMATS = {
+    "hic": ("cool", "mcool"),
+    "signal": ("bw", "bigwig"),
+    "gene_annotation": ("gtf", "gff"),
+    "intervals": ("bed",),
+    "loops": ("headerless bedpe",),
+    "insulation": ("tsv with matching score and boundary window columns",),
+    "boundaries": ("tad boundaries tsv",),
+    "compartment": ("e1 tsv",),
+    "oe": ("oe npy",),
+}
+
+
+def function_catalog() -> List[Dict[str, Any]]:
+    """Summarize registered official API functions independently of figure names.
+
+    Figure contracts still define required counts.  This index answers what
+    a renderer can accept across its supported figure configurations.
+    """
+    functions: Dict[str, Dict[str, Any]] = {}
+    for item in FIGURE_TYPES:
+        entrypoint = item["entrypoint"]
+        function = functions.setdefault(entrypoint, {
+            "entrypoint": entrypoint, "figure_types": [], "accepted_inputs": {},
+        })
+        function["figure_types"].append(item["id"])
+        for role in item["input_contract"]["roles"]:
+            function["accepted_inputs"][role] = list(_ROLE_FORMATS.get(role, (role,)))
+        if item.get("function_inputs"):
+            function["nested_inputs"] = item["function_inputs"]
+    return list(functions.values())
 
 
 def figure_track_mode(figure_type: str | None) -> str:

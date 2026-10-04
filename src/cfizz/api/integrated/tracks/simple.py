@@ -434,22 +434,16 @@ class SimpleTrack:
             ax.set_ylim(current_ylim[0], self.config.max_value)
         # 如果都没指定，让matplotlib自动计算
 
-    def _plot_gtf(self, ax, region: GenomeRange):
-        """绘制GTF基因 - 基于pyGenomeTracks flybase样式设计
-        遵循pyGenomeTracks的设计规范
-        """
-        from matplotlib.patches import Rectangle, Polygon
-
-        # 过滤在region内的基因
+    def _prepare_gtf_layout(self, ax, region: GenomeRange):
+        """Pack visible genes using their genomic spans and rendered label widths."""
         genes_in_region = [
             g for g in self.interval_data
             if g['chrom'] == region.chrom and
                g['end'] > region.start and
                g['start'] < region.end
         ]
-
         if not genes_in_region:
-            return
+            return [], 0
 
         # Greedily pack genes into non-overlapping rows.  The previous
         # implementation reset y_pos every seven genes and calculated ylim
@@ -499,6 +493,33 @@ class SimpleTrack:
                 row_ends[row_index] = occupied_end
             y_pos = row_index * row_scale
             prepared_genes.append((gene, gene_name, start_rel, end_rel, y_pos, label_x, label_align))
+
+        return prepared_genes, len(row_ends)
+
+    def required_height_cm(self, region: GenomeRange, width_cm: float, minimum_cm: float = 1.0) -> float:
+        """Reserve physical space for GTF rows without altering label font size."""
+        if self.track_type != 'gtf':
+            return minimum_cm
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+
+        probe = Figure(figsize=(max(width_cm, 0.1) / 2.54, 1))
+        ax = probe.add_axes([0, 0, 1, 1])
+        FigureCanvasAgg(probe).draw()
+        _, rows = self._prepare_gtf_layout(ax, region)
+        if not rows:
+            return minimum_cm
+        label_height_cm = float(self.config.fontsize) * 2.54 / 72
+        row_height_cm = max(0.32, label_height_cm * 1.45)
+        return max(minimum_cm, 0.2 + rows * row_height_cm)
+
+    def _plot_gtf(self, ax, region: GenomeRange):
+        """Draw GTF genes at their configured font size on packed rows."""
+        prepared_genes, row_count = self._prepare_gtf_layout(ax, region)
+        if not prepared_genes:
+            return
+        fontstyle = self.config.fontstyle if hasattr(self.config, 'fontstyle') else 'normal'
+        row_scale = 2.3
 
         for gene, gene_name, start_rel, end_rel, y_pos, label_x, label_align in prepared_genes:
 
@@ -551,7 +572,7 @@ class SimpleTrack:
 
         # 设置坐标轴 - 使用相对坐标
         ax.set_xlim(0, 1)
-        highest_y = (max(1, len(row_ends)) - 1) * row_scale
+        highest_y = (row_count - 1) * row_scale
         ax.set_ylim(-0.5, highest_y + gene_height + 0.5)
 
     def _split_gene_to_blocks(self, gene, region):
@@ -1152,24 +1173,32 @@ def plot_gtf_tracks(
         width: 用户指定的主绘图区域宽度（cm）
         left_margin: 左侧留白宽度（cm）
         right_margin: 右侧留白宽度（cm）
-        track_heights: 每个track的高度列表（cm），如果不指定则默认为每个1cm
+        track_heights: 每个track的最小高度列表（cm）；GTF会按基因排布行数自动增高
         dpi: 图像分辨率（默认300 DPI）
         gene_name_offset: gene名字距离基因的距离（相对于axes的x轴偏移，可选）
         gene_name_vertical: gene名字的垂直位置（0-1，可选）
     """
     # 1. 用户友好的GTF tracks顺序处理
     tracks = tracks[::-1]  # 倒序处理
+    if track_heights is not None:
+        track_heights = track_heights[::-1]
 
     # 2. 计算图片尺寸
     if track_heights is None:
-        track_heights = [1.0] * len(tracks)  # 默认每个GTF track 1cm
+        track_heights = [1.0] * len(tracks)
+    elif len(track_heights) != len(tracks):
+        raise ValueError(f"track_heights length ({len(track_heights)}) must match tracks length ({len(tracks)})")
+    if width is None:
+        width = 5.0
+    track_heights = [
+        track.required_height_cm(region, width, height)
+        for track, height in zip(tracks, track_heights)
+    ]
     total_track_height = sum(track_heights)
     margin_top = 0.8
     margin_bottom = 1.2  # 底部边距以容纳x轴标签
     total_height_cm = total_track_height + margin_top + margin_bottom
 
-    if width is None:
-        width = 5.0  # 默认5 cm
     total_width_cm = width + left_margin + right_margin
 
     # 3. 设置matplotlib参数
@@ -1215,9 +1244,8 @@ def plot_gtf_tracks(
         ax.spines['bottom'].set_visible(False)
         ax.set_yticks([])
 
-        # 7.3 设置合适的坐标轴范围
+        # 7.3 保留 _plot_gtf 根据排布行数设置的 ylim。
         ax.set_xlim(0, 1)
-        ax.set_ylim(-0.3, 1.5)
 
         # 7.4 可选显示gene name（如果用户提供了偏移量参数）
         if gene_name_offset is not None or gene_name_vertical is not None:
@@ -1457,7 +1485,7 @@ def plot_mixed_tracks(
         width: 图像宽度（可选）
         left_margin: 左边距，默认0.8
         right_margin: 右边距，默认1.6
-        track_heights: 每个track的高度列表（可选）
+        track_heights: 每个track的最小高度列表（可选）；GTF会按基因排布行数自动增高
         dpi: 图像DPI，默认300
         **kwargs: 其他绘图参数
 
@@ -1484,6 +1512,10 @@ def plot_mixed_tracks(
         track_heights = [1.0] * len(tracks)
     elif len(track_heights) != len(tracks):
         raise ValueError(f"track_heights length ({len(track_heights)}) must match tracks length ({len(tracks)})")
+    track_heights = [
+        track.required_height_cm(region, width, height)
+        for track, height in zip(tracks, track_heights)
+    ]
 
     total_track_height = sum(track_heights)
     margin_top = 0.8

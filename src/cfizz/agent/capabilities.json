@@ -2,11 +2,11 @@
   {
     "id": "figure.set_type",
     "description": "用当前数据创建或切换到另一种已接入的图。",
-    "examples": ["画方形热图", "画 O/E 图", "画 insulation score 轨道", "画方形 TAD 边界热图"],
+    "examples": ["画三角 Hi-C 热图", "画方形热图", "画 TAD 图", "画 A/B compartment 图"],
     "target_scope": "figure",
     "allowed_kinds": [],
     "arguments": {
-      "value": {"type": "string", "enum": ["hic_triangle", "hic_square", "hic_oe", "tad_insulation", "tad_insulation_track", "tad_boundary_square", "compartment", "loop_heatmap", "loop_apa"], "required": true}
+      "value": {"type": "string", "enum": ["hic_triangle", "hic_square", "tad_insulation", "compartment", "loop_heatmap", "loop_apa"], "required": true}
     },
     "requires_confirmation": false
   },
@@ -92,7 +92,7 @@
   },
   {
     "id": "layer.set_diverging_palette",
-    "description": "修改 Hi-C O/E 或 A/B compartment 的发散色图，并同步正负 E1 颜色。",
+    "description": "修改 A/B compartment 的发散色图，并同步正负 E1 颜色。",
     "examples": ["把红蓝配色换成紫绿色", "当前 compartment 改成蓝橙配色", "热图换一套发散色"],
     "target_scope": "layer",
     "allowed_kinds": ["hic"],

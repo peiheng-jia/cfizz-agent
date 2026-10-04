@@ -77,6 +77,14 @@ class SimpleIntentInterpreter:
             return IntentResult("undo", "已准备撤销到上一版。")
         if lowered in {"重做", "redo", "恢复下一版"}:
             return IntentResult("redo", "已准备恢复下一版。")
+        removed_figure = self._parse_removed_figure_type(lowered)
+        if removed_figure is not None:
+            label, alternative = removed_figure
+            return IntentResult(
+                "clarify",
+                f"“{label}”已从 CFIZZ Agent 的可生成图类型中取消。{alternative}",
+                planner="rules:removed-figure",
+            )
         if any(word in lowered for word in ("重新画", "重新渲染", "render", "出图")) and self._parse_figure_type(lowered) is None:
             return IntentResult("render", "将使用当前配置重新绘图。")
 
@@ -288,7 +296,7 @@ class SimpleIntentInterpreter:
         palette = self._parse_diverging_palette(lowered)
         if palette and palette[3] == "红蓝" and "换掉" in lowered and not any(word in lowered for word in ("换成", "改成", "改为", "用")):
             palette = ("PRGn", "#1B7837", "#762A83", "紫绿")
-        if spec.get("figure_type") in {"compartment", "hic_oe"} and (palette_request or palette):
+        if spec.get("figure_type") == "compartment" and (palette_request or palette):
             hic_layers = [layer for layer in self._all_layers(spec) if layer.get("kind") == "hic" and layer.get("visible", True)]
             if len(hic_layers) == 1:
                 if palette is None:
@@ -699,15 +707,36 @@ class SimpleIntentInterpreter:
         return {"二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}.get(match.group(1), int(match.group(1)) if match.group(1).isdigit() else None)
 
     @staticmethod
+    def _parse_removed_figure_type(text: str):
+        """Recognize retired Agent figures so they cannot fall back to a wrong plot."""
+        compact = re.sub(r"\s+", "", str(text or "").casefold())
+        retired_ids = {
+            "hic_oe": ("O/E 热图", "O/E 数据仍可作为 A/B Compartment 对比的输入，但不再单独生成 O/E 图。"),
+            "compartment_eigenvector": ("E1 特征向量轨道", "如需查看区室结果，请改用 A/B Compartment 区域图或多样本 Compartment 对比。"),
+            "tad_insulation_track": ("Insulation score 轨道", "如需查看 TAD，请改用 TAD 边界区域图或多样本 TAD 边界对比。"),
+            "tad_boundary_square": ("方形 Hi-C + TAD 边界", "如需查看 TAD，请改用三角 Hi-C 的 TAD 边界区域图。"),
+        }
+        for figure_id, reply in retired_ids.items():
+            if figure_id in compact:
+                return reply
+        compartment_context = any(token in compact for token in ("compartment", "区室", "a/b", "a／b"))
+        if not compartment_context and any(token in compact for token in ("o/e", "oe图", "oe热图", "oe矩阵", "observed/expected")):
+            return "O/E 热图", "O/E 数据仍可作为 A/B Compartment 对比的输入，但不再单独生成 O/E 图。"
+        if any(token in compact for token in ("e1", "特征向量", "eigenvector")) and any(token in compact for token in ("轨道", "单独", "standalone", "track")):
+            return "E1 特征向量轨道", "如需查看区室结果，请改用 A/B Compartment 区域图或多样本 Compartment 对比。"
+        if any(token in compact for token in ("insulation", "绝缘分数")) and any(token in compact for token in ("轨道", "单独", "standalone", "track")):
+            return "Insulation score 轨道", "如需查看 TAD，请改用 TAD 边界区域图或多样本 TAD 边界对比。"
+        if any(token in compact for token in ("tad", "边界", "boundary")) and any(token in compact for token in ("方形", "square")):
+            return "方形 Hi-C + TAD 边界", "如需查看 TAD，请改用三角 Hi-C 的 TAD 边界区域图。"
+        return None
+
+    @staticmethod
     def _parse_figure_type(text: str):
         requests = (
             ("loop_apa", "Loop APA", ("loop apa", "loops apa", "环apa", "环 apa", "聚合峰值")),
             ("loop_heatmap", "Loop 标注热图", ("loop热图", "loop 热图", "标注loop", "标注 loop", "染色质环热图")),
             ("compartment", "A/B Compartment 图", ("a/b compartment", "ab compartment", "a/b区室", "ab区室", "compartment图", "compartment 图")),
-            ("tad_boundary_square", "方形 Hi-C + TAD 边界", ("方形tad", "方形 tad", "方形边界热图", "tad方形热图")),
-            ("tad_insulation_track", "Insulation score 轨道", ("insulation轨道", "insulation score轨道", "绝缘分数轨道", "单独画绝缘分数")),
             ("tad_insulation", "TAD / Insulation 图", ("insulation", "绝缘分数", "tad图", "tad 图")),
-            ("hic_oe", "O/E 热图", ("o/e", "oe热图", "oe 热图", "observed/expected")),
             ("hic_square", "方形 Hi-C 热图", ("方形热图", "方形 hic", "方形hi-c", "矩阵热图")),
             ("hic_triangle", "三角 Hi-C 热图", ("三角热图", "三角 hic", "三角hi-c")),
         )
@@ -814,7 +843,7 @@ class SimpleIntentInterpreter:
 
         is_multi = figure_type in {"loop_multi", "loop_diff_region"}
         if is_multi:
-            current_value = spec.get("workflow_options", {}).get("loop_size", 50)
+            current_value = spec.get("workflow_options", {}).get("loop_size", 12)
         else:
             hic_layers = [layer for layer in self._all_layers(spec) if layer.get("kind") == "hic" and layer.get("visible", True)]
             if not hic_layers:
@@ -823,7 +852,7 @@ class SimpleIntentInterpreter:
         try:
             current = float(current_value)
         except (TypeError, ValueError):
-            current = 50.0 if is_multi else 2.0
+            current = 12.0 if is_multi else 2.0
 
         explicit = re.search(
             r"(?:loop|loops|环|圈|marker).*?(?:调到|改成|设为|设置为|到|=|为)\s*([\d,.]+)",

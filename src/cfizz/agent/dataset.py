@@ -301,12 +301,13 @@ def scan_dataset(
     max_files: int = 500,
     file_overrides: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> DatasetScan:
-    """Scan an authorized directory without reading raw signal matrices."""
+    """Scan an authorized file or directory without reading raw signal matrices."""
     resolved = inspector.resolve_path(root)
-    if not resolved.exists() or not resolved.is_dir():
-        raise ValueError("数据包路径必须是已授权的文件夹。")
+    supported_file = resolved.is_file() and resolved.suffix.lower() in _SCAN_SUFFIXES
+    if not resolved.exists() or not (resolved.is_dir() or supported_file):
+        raise ValueError("数据包路径必须是已授权的文件夹或支持的数据文件。")
 
-    candidates = sorted(
+    candidates = [resolved] if supported_file else sorted(
         (path for path in resolved.rglob("*") if path.is_file() and path.suffix.lower() in _SCAN_SUFFIXES),
         key=lambda item: str(item).lower(),
     )
@@ -1265,7 +1266,6 @@ def _capabilities(files: list[DatasetFile]) -> list[Dict[str, Any]]:
         capabilities.extend([
             {"id": "hic_triangle", "label": "Hi-C 三角热图", "ready": True},
             {"id": "hic_square", "label": "Hi-C 方形热图", "ready": True},
-            {"id": "hic_oe", "label": "O/E 热图", "ready": True},
             {"id": "tad_insulation", "label": "TAD / Insulation", "ready": True},
         ])
     if "hic" in roles and "compartment" in roles:
@@ -1278,14 +1278,9 @@ def _capabilities(files: list[DatasetFile]) -> list[Dict[str, Any]]:
     if "hic" in roles and ({"signal", "gene_annotation", "intervals"} & roles):
         capabilities.append({"id": "integrated", "label": "多组学整合图", "ready": True, "figure_type": "hic_triangle"})
     if "insulation" in roles:
-        capabilities.extend([
-            {"id": "tad_insulation_track", "label": "Insulation score 轨道", "ready": True},
-            {"id": "tad_multi", "label": "多样本 TAD 对比", "ready": "hic" in roles},
-        ])
+        capabilities.append({"id": "tad_multi", "label": "多样本 TAD 对比", "ready": "hic" in roles})
     if "boundaries" in roles and "hic" in roles:
         capabilities.append({"id": "tad_boundary_pileup", "label": "TAD Boundary Pileup", "ready": True})
-    if "compartment" in roles:
-        capabilities.append({"id": "compartment_eigenvector", "label": "E1 特征向量轨道", "ready": True})
     if "compartment" in roles and "oe" in roles and "hic" in roles:
         capabilities.append({"id": "compartment_multi", "label": "多样本 Compartment", "ready": True})
     if "loops" in roles and "hic" in roles:

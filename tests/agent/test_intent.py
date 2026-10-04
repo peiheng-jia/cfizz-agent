@@ -83,11 +83,21 @@ class IntentInterpreterTests(unittest.TestCase):
         self.assertEqual((operation["target_kind"], operation["field"]), ("layout", "right_margin_cm"))
         self.assertGreater(operation["value"], self.spec["layout"]["right_margin_cm"])
 
-    def test_switches_to_existing_figure_type(self):
-        result = self.interpreter.interpret("用这个文件画 O/E 热图", self.spec)
-        self.assertEqual(result.action, "patch")
-        operation = result.patch["operations"][0]
-        self.assertEqual((operation["target_kind"], operation["field"], operation["value"]), ("figure", "figure_type", "hic_oe"))
+    def test_removed_figure_types_are_not_remapped_to_other_plots(self):
+        for message, label in (
+            ("用这个文件画 O/E 热图", "O/E 热图"),
+            ("画 E1 特征向量轨道", "E1 特征向量轨道"),
+            ("生成 insulation score 轨道", "Insulation score 轨道"),
+            ("画方形 TAD 边界热图", "方形 Hi-C + TAD 边界"),
+            ("figure_type=hic_oe", "O/E 热图"),
+            ("figure_type=compartment_eigenvector", "E1 特征向量轨道"),
+            ("figure_type=tad_insulation_track", "Insulation score 轨道"),
+            ("figure_type=tad_boundary_square", "方形 Hi-C + TAD 边界"),
+        ):
+            result = self.interpreter.interpret(message, self.spec)
+            self.assertEqual(result.action, "clarify")
+            self.assertIsNone(result.patch)
+            self.assertIn(label, result.reply)
 
     def test_switches_to_compartment(self):
         result = self.interpreter.interpret("画一个 A/B compartment 图", self.spec)

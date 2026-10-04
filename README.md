@@ -1270,7 +1270,7 @@ curl -X POST http://127.0.0.1:8000/api/sessions/from-dataset \
   -d '{"session_id":"foxj1_case1","path":"/path/to/case1","gene":"FOXJ1","window":500000}'
 ```
 
-单个 `.cool/.mcool` 载入后可在“图类型”中选择三角 Hi-C、方形 Hi-C、O/E、TAD/Insulation、A/B Compartment、Loop 标注热图和 Loop APA，也可直接说“画 O/E 热图”“画 A/B compartment 图”或“改成 Loop APA”。所有出图只能调用 `cfizz.api` 正式绘图入口；Agent 不创建坐标轴或提供替代风格。距离衰减 P(s) 因 CFIZZ 尚无统一风格的正式绘图 API，当前明确标记为未接入。图类型切换会进入同一个可撤销版本历史，之后仍可继续修改区域、分辨率、字体和样式。Agent 会在样本附近的 `output` 目录自动发现与样本匹配的 E1 或 Loop 结果并采用其实际分辨率；没有配套文件时会明确提示所需输入。
+单个 `.cool/.mcool` 载入后可在“图类型”中选择三角 Hi-C、方形 Hi-C、TAD 边界区域图、A/B Compartment、Loop 标注热图和 Loop APA，也可直接说“画 TAD 图”“画 A/B compartment 图”或“改成 Loop APA”。独立 O/E 热图、E1 特征向量轨道、Insulation score 轨道和方形 Hi-C + TAD 边界不作为 Agent 图类型提供；其中 O/E 和 E1 仍可作为 Compartment 工作流的配套输入。所有出图只能调用 `cfizz.api` 正式绘图入口；Agent 不创建坐标轴或提供替代风格。距离衰减 P(s) 因 CFIZZ 尚无统一风格的正式绘图 API，当前明确标记为未接入。图类型切换会进入同一个可撤销版本历史，之后仍可继续修改区域、分辨率、字体和样式。Agent 会在样本附近的 `output` 目录自动发现与样本匹配的 E1 或 Loop 结果并采用其实际分辨率；没有配套文件时会明确提示所需输入。
 
 如需启用更自然的对话理解，可直接在网页的“API 与数据设置”中选择 OpenAI 或 DeepSeek，填写 API Key 和可选模型后点击“连接并使用”。网页提交的密钥仅保存在当前服务进程的内存中，不写入项目、会话历史或浏览器存储，服务重启后自动清除。也可以继续通过服务端环境变量预配置：
 

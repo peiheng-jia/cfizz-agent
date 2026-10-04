@@ -5,6 +5,7 @@ This module provides functions for generating saddle plots from Hi-C data,
 useful for visualizing chromatin compartment (A/B) interaction patterns.
 """
 
+import hashlib
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
@@ -550,6 +551,40 @@ def clear_saddle_cache(cache_dir: str = "cache"):
         print(f"缓存目录不存在: {cache_dir}")
 
 
+def _saddle_cache_file(
+    cache_dir: Path,
+    cool_file: str,
+    eigenvector_file: str,
+    sample_name: str,
+    n_bins: int,
+    contact_type: str,
+) -> Path:
+    """Return a cache path tied to the actual scientific inputs."""
+
+    def identity(value: str) -> str:
+        parts = str(value).split("::", 1)
+        file_path = Path(parts[0]).expanduser().resolve()
+        cooler_group = f"::{parts[1]}" if len(parts) == 2 else ""
+        try:
+            stat = file_path.stat()
+            return f"{file_path}{cooler_group}|{stat.st_size}|{stat.st_mtime_ns}"
+        except OSError:
+            return f"{file_path}{cooler_group}"
+
+    payload = "|".join((
+        identity(cool_file),
+        identity(eigenvector_file),
+        str(int(n_bins)),
+        str(contact_type),
+    ))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    safe_sample = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in str(sample_name)
+    ).strip("_") or "sample"
+    return cache_dir / f"{safe_sample}.{digest}.saddle.pkl"
+
+
 def process_saddle_sample(args):
     """处理单个样品的saddle图计算
     
@@ -566,7 +601,14 @@ def process_saddle_sample(args):
         cache_dir.mkdir(parents=True, exist_ok=True)
         
         # 生成缓存文件名
-        cache_file = cache_dir / f"{sample_name}_saddle_data.pkl"
+        cache_file = _saddle_cache_file(
+            cache_dir,
+            cool_file,
+            eigenvector_file,
+            sample_name,
+            n_bins,
+            contact_type,
+        )
         
         # 尝试从缓存读取数据
         if cache_file.exists():
@@ -755,7 +797,8 @@ def generate_multi_saddle(
     n_cols: Optional[int] = None,
     n_rows: Optional[int] = None,
     max_workers: int = 28,
-    nproc: int = 8
+    nproc: int = 8,
+    output_prefix: Optional[str] = None,
 ) -> Dict[str, Any]:
     """生成多个样品的saddle图
     
@@ -785,7 +828,10 @@ def generate_multi_saddle(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # 生成输出文件名
-    output_prefix = output_dir / "multi_saddle_plot"
+    output_prefix = Path(output_prefix) if output_prefix else output_dir / "multi_saddle_plot"
+
+    if not cool_files or len(cool_files) != len(eigenvector_files) or len(cool_files) != len(sample_names):
+        raise ValueError("Compartment Saddle 要求每个 Hi-C 样本各自对应一个 E1 文件和样本名。")
     
     # 准备并行处理参数
     args = [(cool_file, eigenvector_file, sample_name, idx, cache_dir, n_bins, contact_type, nproc) 
@@ -797,6 +843,19 @@ def generate_multi_saddle(
     
     # 按原始顺序排序结果
     results.sort(key=lambda x: x['idx'])
+
+    failures = [result for result in results if result.get('status') != 'success']
+    if failures:
+        details = "; ".join(
+            f"{result.get('sample_name', 'sample')}: {result.get('error', '未知错误')}"
+            for result in failures
+        )
+        return {
+            'status': 'error',
+            'error': f"Compartment Saddle 计算失败：{details}",
+            'output_prefix': str(output_prefix),
+            'results': results,
+        }
     
     # 使用新的可视化函数
     plot_multi_saddle(
@@ -813,6 +872,7 @@ def generate_multi_saddle(
     return {
         'status': 'success',
         'output_prefix': str(output_prefix),
+        'output_files': [f"{output_prefix}.{fmt}" for fmt in ('png', 'svg', 'pdf')],
         'results': results
     }
 
@@ -828,7 +888,8 @@ def generate_single_saddle(
     heatmap_size: float = 4,
     vmin: float = -2,
     vmax: float = 2,
-    nproc: int = 8
+    nproc: int = 8,
+    output_prefix: Optional[str] = None,
 ) -> Dict[str, Any]:
     """生成单个样品的saddle图
     
@@ -853,7 +914,7 @@ def generate_single_saddle(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # 生成输出文件名
-    output_file = output_dir / f"{sample_name}_saddle_plot"
+    output_file = Path(output_prefix) if output_prefix else output_dir / f"{sample_name}_saddle_plot"
     
     # 处理单个样本
     result = process_saddle_sample((
@@ -880,12 +941,13 @@ def generate_single_saddle(
         return {
             'status': 'success',
             'output_file': str(output_file),
+            'output_files': [f"{output_file}.{fmt}" for fmt in ('png', 'svg', 'pdf')],
             'sample_name': sample_name
         }
     else:
         return {
             'status': 'error',
-            'error': result['error'],
+            'error': f"Compartment Saddle 计算失败（{sample_name}）：{result.get('error', '未知错误')}",
             'sample_name': sample_name,
-            'output_file': str(output_file)
+            'output_file': str(output_file),
         }

@@ -75,9 +75,24 @@ def _resolution_from_name(path: Path) -> Optional[int]:
     return int(float(value) * scale)
 
 
-def companion_resolution(path: str | Path) -> Optional[int]:
-    """Return the bin width encoded in a standard CFIZZ result filename."""
+def companion_resolution(
+    path: str | Path,
+    metadata: Optional[dict] = None,
+) -> Optional[int]:
+    """Return the grid used by a CFIZZ result table.
 
+    Inspected table contents are authoritative when available.  Falling back
+    to the standard CFIZZ filename keeps request planning lightweight and
+    supports callers that intentionally skip file inspection.
+    """
+
+    if metadata:
+        value = metadata.get("bin_size")
+        try:
+            if value is not None and int(value) > 0:
+                return int(value)
+        except (TypeError, ValueError):
+            pass
     return _resolution_from_name(Path(path))
 
 

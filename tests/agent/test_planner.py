@@ -171,7 +171,7 @@ class PlannerTests(unittest.TestCase):
             if item["target_kind"] == "figure" and item["parameter"].startswith("workflow_options.")
         ]
         loop_size = next(item for item in workflow if item["parameter"] == "workflow_options.loop_size")
-        self.assertEqual(loop_size["current_value"], 50)
+        self.assertEqual(loop_size["current_value"], 12)
         self.assertIn("set", loop_size["operations"])
         self.assertFalse(any(item["parameter"] == "style.triangle_ratio" for item in catalog))
 
@@ -204,6 +204,7 @@ class PlannerTests(unittest.TestCase):
         result = RuleFirstPlanner(NeverAiPlanner()).interpret("loop圈有点太大了，变小一些吧", spec)
         self.assertEqual(result.action, "patch")
         self.assertEqual(result.patch["operations"][0]["field"], "workflow_options.loop_size")
+        self.assertEqual(result.patch["operations"][0]["value"], 8.4)
         self.assertNotIn("triangle_ratio", json.dumps(result.patch, ensure_ascii=False))
 
     def test_compartment_diff_palette_is_exposed_and_applied_locally(self):
@@ -423,6 +424,34 @@ class PlannerTests(unittest.TestCase):
         self.assertNotIn("demo/data", request)
         self.assertNotIn("E:\\private", request)
         self.assertIn("recent_dialogue", request)
+
+    def test_openai_planner_receives_path_free_workspace_inventory(self):
+        output = PlannerOutput(action="answer", reply="两个 BigWig 已导入并选中。", edits=[])
+        client = FakeClient(output)
+        planner = OpenAIPlanner(client=client, model="test-model")
+        planner.interpret(
+            "把这两个 ATAC 一起画出来",
+            load_spec(),
+            workspace_context={
+                "selected_figure_type": "tracks_signal",
+                "files": [
+                    {"name": "H1_hESC_ATAC.bw", "path": "/secret/data/H1.bw", "role": "signal", "type": "bigwig", "sample": "H1", "selected": True},
+                    {"name": "HFFc6_ATAC.bw", "path": "/secret/data/HFFc6.bw", "role": "signal", "type": "bigwig", "sample": "HFFc6", "selected": True},
+                ],
+                "visualizations": [{"id": "tracks_signal", "label": "BigWig 信号轨道", "category": "tracks", "status": "ready"}],
+                "render_evidence": {"version_id": "v0002", "figure_type": "tracks_signal", "png_exists": False,
+                                    "job_status": "failed", "job_error": "Cannot read /secret/data/HFFc6.bw"},
+                "displayed_preview": {"version_id": "v0001"},
+            },
+        )
+        payload = json.loads(client.responses.call["input"][1]["content"])
+        workspace = payload["workspace_context"]
+        self.assertEqual([item["name"] for item in workspace["files"]], ["H1_hESC_ATAC.bw", "HFFc6_ATAC.bw"])
+        self.assertTrue(all(item["selected"] for item in workspace["files"]))
+        self.assertNotIn("/secret/data", json.dumps(workspace))
+        self.assertEqual(workspace["visualizations"][0]["status"], "ready")
+        self.assertEqual(workspace["render_evidence"]["displayed_preview_version"], "v0001")
+        self.assertEqual(workspace["render_evidence"]["job_status"], "failed")
 
     def test_deepseek_uses_same_safe_schema_with_its_provider_identity(self):
         output = PlannerOutput(action="clarify", reply="请明确要修改哪条轨道。", edits=[])

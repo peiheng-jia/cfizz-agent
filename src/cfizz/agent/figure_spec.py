@@ -233,7 +233,7 @@ class FigureSpecValidator:
         # deferred until the workflow has produced a real spec.
         is_draft = bool((spec.get("metadata") or {}).get("draft"))
         if not is_draft and spec.get("figure_type") in {
-            "hic_triangle", "hic_square", "hic_oe", "hic_multi",
+            "hic_triangle", "hic_square", "hic_multi",
             "tad_insulation", "tad_multi", "tad_boundary_pileup",
             "compartment", "compartment_multi", "compartment_saddle",
             "loop_heatmap", "loop_multi", "loop_apa", "loop_apa_multi",

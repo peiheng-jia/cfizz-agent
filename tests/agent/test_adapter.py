@@ -53,6 +53,29 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(len(result.artifacts), 2)
 
+    def test_render_reports_real_pipeline_stages(self):
+        inspector = DataInspector([str(PROJECT_ROOT)])
+        validator = FigureSpecValidator(inspector)
+        stages = []
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            def fake_renderer(**kwargs):
+                Path(f"{kwargs['output']}.svg").touch()
+                Path(f"{kwargs['output']}.png").touch()
+
+            adapter = CfizzRenderAdapter(validator, output_dir, renderer=fake_renderer)
+            result = adapter.render(
+                self.spec,
+                inspect_files=False,
+                progress_callback=lambda stage, progress: stages.append((stage, progress)),
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(stages[0], ("validating_inputs", 6))
+        self.assertIn(("loading_renderer", 18), stages)
+        self.assertIn(("reading_and_rendering", 25), stages)
+        self.assertEqual(stages[-1], ("publishing_artifacts", 98))
+
     def test_render_fails_when_renderer_does_not_write_artifacts(self):
         inspector = DataInspector([str(PROJECT_ROOT)])
         validator = FigureSpecValidator(inspector)
@@ -64,10 +87,41 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("没有生成预期文件", result.error)
 
+    def test_render_propagates_structured_renderer_error(self):
+        inspector = DataInspector([str(PROJECT_ROOT)])
+        validator = FigureSpecValidator(inspector)
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            adapter = CfizzRenderAdapter(
+                validator,
+                output_dir,
+                renderer=lambda **kwargs: {
+                    "status": "error",
+                    "error": "matrix and E1 resolutions do not match",
+                },
+            )
+            result = adapter.render(self.spec, inspect_files=False)
+
+        self.assertFalse(result.success)
+        self.assertIn("matrix and E1 resolutions do not match", result.error)
+
+    def test_render_without_declared_outputs_requires_at_least_one_artifact(self):
+        inspector = DataInspector([str(PROJECT_ROOT)])
+        validator = FigureSpecValidator(inspector)
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            adapter = CfizzRenderAdapter(validator, output_dir, renderer=lambda **kwargs: None)
+            request = adapter.build_request(self.spec, inspect_files=False)
+            request.expected_artifacts = []
+            adapter.build_request = lambda spec, inspect_files=True: request
+            result = adapter.render(self.spec, inspect_files=False)
+
+        self.assertFalse(result.success)
+        self.assertIn("没有生成任何", result.error)
+
     def test_routes_non_triangle_figure_types_to_registered_renderers(self):
         expected = {
             "hic_square": "plot_hic_square",
-            "hic_oe": "plot_hic_oe",
         }
         inspector = DataInspector([str(PROJECT_ROOT)])
         validator = FigureSpecValidator(inspector)
@@ -226,8 +280,15 @@ class AdapterTests(unittest.TestCase):
         spec["workflow_source_ids"] = [
             "hic_normal", "hic_variant", "loops_normal", "loops_variant",
         ]
+        spec["workflow_options"] = {}
+        with tempfile.TemporaryDirectory() as output_dir:
+            default_request = CfizzRenderAdapter(validator, output_dir).build_request(
+                spec, inspect_files=False,
+            )
+        self.assertEqual(default_request.kwargs["loop_size"], 12)
+
         spec["workflow_options"] = {
-            "loop_size": 12,
+            "loop_size": 20,
             "loop_color": "green",
             "loop_alpha": 0.4,
             "plot_size": 5,
@@ -242,7 +303,7 @@ class AdapterTests(unittest.TestCase):
             str((PROJECT_ROOT / "demo/data/hiPSC_nor.loops.bedpe").resolve()),
             str((PROJECT_ROOT / "demo/data/hiPSC_var.loops.bedpe").resolve()),
         ])
-        self.assertEqual(request.kwargs["loop_size"], 12)
+        self.assertEqual(request.kwargs["loop_size"], 20)
         self.assertEqual(request.kwargs["loop_color"], "green")
         self.assertEqual(request.kwargs["loop_alpha"], 0.4)
         self.assertEqual(request.kwargs["plot_size"], 5)
@@ -287,6 +348,40 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(len(request.kwargs["hics"]), 2)
         self.assertGreaterEqual(len(request.kwargs["tracks"]), 1)
 
+    def test_integrated_function_binds_inspected_loop_and_tad_inputs_per_sample(self):
+        from cfizz.agent.figure_types import FIGURE_TYPE_BY_ID
+
+        capability = FIGURE_TYPE_BY_ID["tracks_integrated"]["function_inputs"]
+        self.assertEqual(set(capability["hic_overlays"]), {"loops_path", "insulation_path"})
+        spec = json.loads(json.dumps(self.spec))
+        spec["figure_type"] = "tracks_integrated"
+        with tempfile.TemporaryDirectory() as root:
+            for sample in ("hiPSC_nor", "hiPSC_var"):
+                loop = Path(root) / f"{sample}.bedpe"
+                loop.write_text("chr17\t75400000\t75410000\tchr17\t75500000\t75510000\n", encoding="utf-8")
+                insulation = Path(root) / f"{sample}.insulation.tsv"
+                insulation.write_text(
+                    "chrom\tstart\tend\tlog2_insulation_score_50000\tis_boundary_50000\t"
+                    "log2_insulation_score_100000\tis_boundary_100000\n"
+                    "chr17\t75400000\t75410000\t0.2\tFalse\t0.3\tTrue\n",
+                    encoding="utf-8",
+                )
+                spec["data_sources"].extend([
+                    {"id": f"loop_{sample}", "type": "bedpe", "role": "loops", "sample": sample, "path": str(loop)},
+                    {"id": f"tad_{sample}", "type": "insulation_tsv", "role": "insulation", "sample": sample, "path": str(insulation)},
+                ])
+            inspector = DataInspector([str(PROJECT_ROOT), root])
+            request = CfizzRenderAdapter(FigureSpecValidator(inspector), root).build_request(spec, inspect_files=False)
+            self.assertEqual(request.entrypoint, "cfizz.api.quick_plot_integrated")
+            self.assertEqual(len(request.kwargs["tracks"]), 10)
+            self.assertEqual(
+                {Path(hic["loops_path"]).name for hic in request.kwargs["hics"]},
+                {"hiPSC_nor.bedpe", "hiPSC_var.bedpe"},
+            )
+            for hic in request.kwargs["hics"]:
+                self.assertEqual(hic["window_size"], 100_000)
+                self.assertTrue(Path(hic["insulation_path"]).exists())
+
     def test_discovers_case_companions_and_uses_their_resolution(self):
         inspector = DataInspector([str(PROJECT_ROOT)])
         validator = FigureSpecValidator(inspector)
@@ -297,8 +392,6 @@ class AdapterTests(unittest.TestCase):
             adapter = CfizzRenderAdapter(validator, output_dir)
             for figure_type, suffix, resolution in (
                 ("tad_insulation", "quick_plot_integrated", 10_000),
-                ("tad_insulation_track", "plot_tad_insulation_track", 10_000),
-                ("tad_boundary_square", "plot_hic_tad_square", 10_000),
                 ("compartment", "plot_hic_compartment", 100_000),
                 ("loop_heatmap", "plot_hic_loops", 10_000),
                 ("loop_apa", "plot_hic_loop_apa", 10_000),
@@ -355,11 +448,80 @@ class AdapterTests(unittest.TestCase):
         spec["workflow_source_ids"] = [source["id"] for source in spec["data_sources"]]
         with tempfile.TemporaryDirectory() as output_dir:
             request = CfizzRenderAdapter(validator, output_dir).build_request(spec)
-        self.assertEqual(request.entrypoint, "cfizz.api.plot_heatmap_with_tad_boundaries")
+        self.assertEqual(request.entrypoint, "cfizz.api.quick_plot_integrated")
         self.assertEqual(request.kwargs["resolution"], 10_000)
         self.assertEqual(
-            [Path(path).resolve() for path in request.kwargs["insulation_paths"]],
+            [Path(hic["insulation_path"]).resolve() for hic in request.kwargs["hics"]],
             [path.resolve() for path in explicit_insulations],
+        )
+        self.assertEqual([hic["resolution"] for hic in request.kwargs["hics"]], [10_000, 10_000])
+        self.assertEqual([hic["window_size"] for hic in request.kwargs["hics"]], [100_000, 100_000])
+        self.assertEqual([hic["triangle_ratio"] for hic in request.kwargs["hics"]], [0.5, 0.5])
+        self.assertEqual([hic["flip_vertical"] for hic in request.kwargs["hics"]], [False, True])
+        self.assertEqual(request.kwargs["tracks"], [])
+        self.assertEqual(request.kwargs["n_tracks"], 0)
+        self.assertEqual(request.kwargs["region"].chrom, "chr17")
+        self.assertNotIn("plot_size", request.kwargs)
+        spec["workflow_options"] = {"window_size": 50_000, "boundary_cmap": "Greys"}
+        with tempfile.TemporaryDirectory() as output_dir:
+            request = CfizzRenderAdapter(validator, output_dir).build_request(spec)
+        self.assertEqual([hic["window_size"] for hic in request.kwargs["hics"]], [50_000, 50_000])
+        self.assertEqual([hic["boundary_cmap"] for hic in request.kwargs["hics"]], ["Greys", "Greys"])
+        self.assertNotIn("window_size", request.kwargs)
+        spec["workflow_options"] = {"window_size": 200_000}
+        with tempfile.TemporaryDirectory() as output_dir:
+            with self.assertRaisesRegex(ValueError, "可选窗口：50 kb、100 kb、500 kb"):
+                CfizzRenderAdapter(validator, output_dir).build_request(spec)
+
+    def test_saddle_uses_e1_grid_before_starting_the_expensive_workflow(self):
+        inspector = DataInspector([str(PROJECT_ROOT)])
+        validator = FigureSpecValidator(inspector)
+        hic_path = PROJECT_ROOT / "demo/cases/2121401/1_2_pairs_result/51_5/51_5_1000.mcool"
+        e1_path = PROJECT_ROOT / (
+            "demo/cases/2121401/1_3_hicviz_output/1_computation/compartment/"
+            "1_1.51_5_1000.51_5_1000.100kb.E1.tsv"
+        )
+        if not hic_path.exists() or not e1_path.exists():
+            self.skipTest("local Saddle inputs are not installed")
+
+        spec = json.loads(json.dumps(self.spec))
+        hic_source = next(source for source in spec["data_sources"] if source["type"] == "mcool")
+        hic_source.update({
+            "path": str(hic_path),
+            "sample": "51_5_1000",
+            "label": "51_5_1000",
+        })
+        hic_layer = next(
+            layer for panel in spec["panels"] for layer in panel["layers"]
+            if layer["kind"] == "hic" and layer["source_id"] == hic_source["id"]
+        )
+        spec["data_sources"] = [
+            hic_source,
+            {
+                "id": "compartment_1",
+                "type": "compartment_tsv",
+                "path": str(e1_path),
+                "sample": "51_5_1000",
+                "label": "51_5_1000 E1",
+                "role": "compartment",
+            },
+        ]
+        spec["panels"] = [{
+            "id": "hic_panel", "kind": "hic_heatmap", "layers": [hic_layer],
+        }]
+        spec["figure_type"] = "compartment_saddle"
+        spec["analysis"]["resolution"] = 5_000
+        spec["workflow_source_ids"] = [hic_source["id"], "compartment_1"]
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            request = CfizzRenderAdapter(validator, output_dir).build_request(spec)
+
+        self.assertEqual(request.entrypoint, "cfizz.api.generate_single_saddle")
+        self.assertTrue(request.kwargs["cool_file"].endswith("::/resolutions/100000"))
+        self.assertEqual(request.kwargs["output_prefix"], request.output_prefix)
+        self.assertEqual(
+            request.expected_artifacts,
+            [f"{request.output_prefix}.{extension}" for extension in spec["export"]["formats"]],
         )
 
     def test_tad_diff_region_accepts_one_ordinary_boundary_grid_per_hic(self):
