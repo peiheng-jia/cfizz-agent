@@ -81,6 +81,16 @@ class WorkflowRequest(BaseModel):
     options: Dict[str, Any] = Field(default_factory=dict)
 
 
+class PlannedRequirement(BaseModel):
+    """One user-visible outcome in a multi-part request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requirement: str = Field(min_length=1, max_length=300)
+    status: Literal["will_apply", "already_satisfied", "needs_input", "unsupported"]
+    detail: str = Field(default="", max_length=500)
+
+
 class PlannerOutput(BaseModel):
     """Structured output requested from the model."""
 
@@ -91,6 +101,7 @@ class PlannerOutput(BaseModel):
     edits: List[PlannedEdit] = Field(default_factory=list)
     parameter_edits: List[ParameterEdit] = Field(default_factory=list)
     calls: List[CapabilityCall] = Field(default_factory=list)
+    requirements: List[PlannedRequirement] = Field(default_factory=list, max_length=20)
     reference_request: Optional[ReferenceRequest] = None
     workflow_request: Optional[WorkflowRequest] = None
 
@@ -323,7 +334,8 @@ class RuleFirstPlanner:
             kwargs: Dict[str, Any] = {"history": history}
             if _accepts_argument(method, "workspace_context"):
                 kwargs["workspace_context"] = workspace_context
-            return method(message, spec, **kwargs)
+            result = method(message, spec, **kwargs)
+            return _guard_compound_plan(message, result)
         except Exception as exc:
             return self._fallback(local, exc)
 
@@ -340,12 +352,14 @@ class RuleFirstPlanner:
                 kwargs: Dict[str, Any] = {"history": history}
                 if _accepts_argument(method, "workspace_context"):
                     kwargs["workspace_context"] = workspace_context
-                return await method(message, spec, **kwargs)
+                result = await method(message, spec, **kwargs)
+                return _guard_compound_plan(message, result)
             sync_method = self.ai_planner.interpret
             kwargs = {"history": history}
             if _accepts_argument(sync_method, "workspace_context"):
                 kwargs["workspace_context"] = workspace_context
-            return sync_method(message, spec, **kwargs)
+            result = sync_method(message, spec, **kwargs)
+            return _guard_compound_plan(message, result)
         except Exception as exc:
             return self._fallback(local, exc)
 
@@ -370,7 +384,20 @@ class RuleFirstPlanner:
         track_order_request = (
             local.action == "patch"
             and bool(local.patch)
-            and any(operation.get("op") == "move_layer" for operation in local.patch.get("operations", []))
+            and any(operation.get("op") in {"move_layer", "reorder_layers"} for operation in local.patch.get("operations", []))
+        )
+        assay_color_request = (
+            local.action == "patch"
+            and bool(local.patch)
+            and any(token in compact for token in (
+                "按组学", "按测序类型", "按技术类型", "不同颜色", "不同的颜色", "颜色区分", "组学配色",
+            ))
+            and any(
+                operation.get("op") == "update"
+                and operation.get("target_kind") == "layer"
+                and operation.get("field") == "style.color"
+                for operation in local.patch.get("operations", [])
+            )
         )
         workflow_palette_request = (
             local.action == "patch"
@@ -398,6 +425,7 @@ class RuleFirstPlanner:
             (compact in exact_commands and local.action in {"undo", "redo", "render"})
             or assay_axis_request
             or track_order_request
+            or assay_color_request
             or workflow_palette_request
             or deterministic_font_request
         )
@@ -680,6 +708,19 @@ def public_workspace_context(context: Dict[str, Any]) -> Dict[str, Any]:
             "file_count": clean_count(item.get("file_count")),
         })
 
+    operation = context.get("recent_operation") if isinstance(context.get("recent_operation"), dict) else {}
+    def clean_operation_files(key: str) -> list[Dict[str, Any]]:
+        result = []
+        for item in operation.get(key, [])[:80]:
+            if not isinstance(item, dict):
+                continue
+            result.append({
+                "name": clean(item.get("name"), 260),
+                "role": clean(item.get("role"), 80),
+                "sample": clean(item.get("sample"), 160),
+            })
+        return result
+
     evidence = context.get("render_evidence") if isinstance(context.get("render_evidence"), dict) else {}
     preview = context.get("displayed_preview") if isinstance(context.get("displayed_preview"), dict) else {}
 
@@ -690,6 +731,13 @@ def public_workspace_context(context: Dict[str, Any]) -> Dict[str, Any]:
         "imported_sources": sources,
         "files": files,
         "visualizations": visualizations,
+        "recent_operation": {
+            "action": clean(operation.get("action"), 80),
+            "added": clean_operation_files("added"),
+            "removed": clean_operation_files("removed"),
+            "selected_count": clean_count(operation.get("selected_count")),
+            "selected_files": clean_operation_files("selected_files"),
+        } if operation else None,
         "render_evidence": {
             "version_id": clean(evidence.get("version_id"), 40),
             "figure_type": clean(evidence.get("figure_type"), 120),
@@ -709,8 +757,8 @@ def public_workspace_context(context: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def public_dialogue_context(history: List[Dict[str, str]], limit: int = 20) -> List[Dict[str, str]]:
-    """Return a short, path/key-redacted dialogue window for contextual planning."""
+def public_dialogue_context(history: List[Dict[str, str]], limit: int = 40) -> List[Dict[str, str]]:
+    """Return the full bounded session dialogue, with paths and keys redacted."""
     result = []
     for item in history[-limit:]:
         role = item.get("role")
@@ -747,6 +795,21 @@ def _planner_failure_reason(exc: Exception) -> str:
     return "调用异常"
 
 
+def _guard_compound_plan(message: str, result: IntentResult) -> IntentResult:
+    """Do not execute a numbered multi-part request if the model omitted its checklist."""
+    item_count = len(re.findall(r"(?:^|[\s，,。；;])\s*\d+[、.)）]", message))
+    if item_count < 2 or result.action not in {"patch", "workflow"}:
+        return result
+    plan = (result.patch or {}).get("requirement_plan", [])
+    if len(plan) >= item_count:
+        return result
+    return IntentResult(
+        "clarify",
+        f"我识别到这条消息包含至少 {item_count} 项要求，但没能逐项核对完整；为避免漏改或用错数据，这次没有执行。请稍后重试，或把要求分条发送。",
+        planner=f"{result.planner}:incomplete-requirement-plan",
+    )
+
+
 def _repair_feedback(exc: ValueError) -> str:
     """Return bounded, non-sensitive validation feedback for one model retry."""
     message = public_dialogue_text(str(exc))
@@ -781,8 +844,11 @@ def compile_plan(output: PlannerOutput, spec: Dict[str, Any], planner: str = "ai
         if item is None or not item.get("ready"):
             raise ValueError(f"未登记的 CFIZZ 可视化工作流：{figure_type!r}。")
         return IntentResult(
-            "workflow", output.reply,
-            {"workflow_request": output.workflow_request.model_dump()},
+            "workflow", _append_requirement_summary(output.reply, output.requirements),
+            {
+                "workflow_request": output.workflow_request.model_dump(),
+                **_requirement_plan_patch(output.requirements),
+            },
             planner=planner,
         )
     if output.workflow_request is not None:
@@ -791,6 +857,13 @@ def compile_plan(output: PlannerOutput, spec: Dict[str, Any], planner: str = "ai
     if output.action != "patch":
         if output.edits or output.parameter_edits or output.calls:
             raise ValueError("非 patch 动作不能包含 edits、parameter_edits 或 calls。")
+        if output.requirements:
+            return IntentResult(
+                output.action,
+                _append_requirement_summary(output.reply, output.requirements),
+                {"requirement_plan": [item.model_dump() for item in output.requirements]},
+                planner=planner,
+            )
         return IntentResult(output.action, output.reply, planner=planner)
     if not output.edits and not output.parameter_edits and not output.calls:
         raise ValueError("patch 动作至少需要一个 edit、parameter_edit 或 capability call。")
@@ -822,13 +895,50 @@ def compile_plan(output: PlannerOutput, spec: Dict[str, Any], planner: str = "ai
     reply = output.reply
     if adjustment_notes:
         reply = "；".join(adjustment_notes) + "。"
+    if output.requirements:
+        _validate_requirement_plan(output.requirements, operations)
+        reply = _append_requirement_summary(reply, output.requirements)
     return IntentResult(
         "patch",
         reply,
-        {"summary": reply[:160], "operations": operations},
+        {
+            "summary": reply[:160],
+            "operations": operations,
+            **_requirement_plan_patch(output.requirements),
+        },
         requires_confirmation=scientific,
         planner=planner,
     )
+
+
+def _requirement_plan_patch(requirements: List[PlannedRequirement]) -> Dict[str, Any]:
+    if not requirements:
+        return {}
+    return {"requirement_plan": [item.model_dump() for item in requirements]}
+
+
+def _validate_requirement_plan(requirements: List[PlannedRequirement], operations: List[Dict[str, Any]]) -> None:
+    """Reject a plan that promises edits without any executable operation."""
+    if any(item.status == "will_apply" for item in requirements) and not operations:
+        raise ValueError("requirement_plan 标记了将执行的要求，但没有对应的可执行绘图操作。")
+    if any(not item.requirement.strip() for item in requirements):
+        raise ValueError("requirement_plan 中存在空白要求。")
+
+
+def _append_requirement_summary(reply: str, requirements: List[PlannedRequirement]) -> str:
+    """Expose per-item handling so omissions and capability gaps are visible."""
+    labels = {
+        "will_apply": "将执行",
+        "already_satisfied": "已满足",
+        "needs_input": "待补充",
+        "unsupported": "暂不支持",
+    }
+    lines = []
+    for index, item in enumerate(requirements, 1):
+        detail = f"：{item.detail}" if item.detail else ""
+        lines.append(f"{index}. {item.requirement} — {labels[item.status]}{detail}")
+    summary = "逐项处理：\n" + "\n".join(lines)
+    return f"{reply.rstrip()}\n\n{summary}" if reply.strip() else summary
 
 
 def _compile_edit(
@@ -948,7 +1058,7 @@ _SYSTEM_PROMPT = """你是 CFIZZ 科研图形规划器。把用户请求转换�
 19. editable_parameters 含当前值、类型、范围和允许操作。对“再大一点/再小一点/隐藏/显示/换颜色/增加留白”等请求，直接使用通用 parameter_edits；不要因为没有专用 edit_type 而拒绝。
 20. 单基因注释轨道的数据源已经按 CFIZZ 示例预先提取为单基因 GTF。“只显示 MYC 基因”不需要隐藏任何图层；若当前基因轨道标签已经是 MYC，直接用 answer 说明已满足。必须保留 Hi-C 图层。
 21. y 轴语义必须区分：用户说“所有轨道一致”使用 tracks.sync_y_axis mode=auto；说“按测序技术/每种类型内部一致”使用 mode=by_assay，使 ATAC、CTCF、H3K、RNA 等各自形成独立共享组，绝不能把所有技术设为同一组。
-22. 用户要求调整轨道顺序时使用 tracks.reorder：target 选择要移动的真实 layer，放到另一条轨道“上面/前面”时把该轨道 ID 填入 before_layer_id；要求放到“最后/最下面”时省略 before_layer_id。若用户说“放到 Y 下面”，应移动 Y 或把目标关系转换为合法的 before_layer_id，不能修改图层标签冒充排序。
+22. 用户要求调整轨道顺序时使用 tracks.reorder：单条移动按真实 layer ID 和 before_layer_id 表达；用户给出完整顺序或要求按组学/样本归组时，target.ids 必须按最终从上到下的顺序填写全部明确目标 layer ID，并填写它们所属的真实 panel_id，不能把完整顺序拆成一串可能产生错误终态的单轨移动，也不能修改图层标签冒充排序。只有存在多个合理解释时才澄清；不得声称修改已完成，除非服务端已应用并完成绘图。
 23. 涉及基因时先判断整句语义：只有用户明确要求定位某个基因、绘制/添加某个基因轨道，或绘制当前区域全部基因时，才使用 action=reference，并填写 reference_request。locate_gene 只定位区域；annotate_gene 定位并添加指定基因轨道；annotate_region_genes 显示当前区域全部基因。gene_symbol 只能填写用户实际提到的候选名称，绝不能生成基因坐标。用户询问“为什么基因文字在 Hi-C 图上”“这是什么基因”“某标签是否重叠”等属于问题或版式修改，不是 reference。Hi-C/HIC、ATAC、CTCF、RNA、BigWig、GTF 是数据或轨道类型，不能当成基因名称。基因名称和坐标最终由本地参考注释验证。
 24. 用户要求创建 available_visualizations 中 selection_mode=conversation 的图时，使用 action=workflow 并逐字填写该条目的 figure_type；source_ids 只能从 current_figure.data_sources 的真实 ID 中选择，options 只填写用户明确给出的科学参数。不要用普通 patch 假装已经完成。服务端会核对当前数据源并绑定正式 CFIZZ entrypoint，缺少数据时会明确向用户索取。
 25. 多样本工作流的正式参数位于 editable_parameters 中的 figure.workflow_options.*。Loop 圈/标记“太大、太小”只能修改 loop_multi/loop_diff_region 的 workflow_options.loop_size（或单样本 loop_heatmap 图层的 style.loop_size），绝不能用 triangle_ratio 代替；triangle_ratio 只表示三角热图高度。Loop 颜色和透明度分别使用 loop_color、loop_alpha。TAD 的 window_size 选择 insulation 文件里已有的绝缘分数与边界列；如果目录给出 enum，只能选 enum 中的值，不得声称任意窗口都能直接重算。compartment 的 bar_height_ratio 是 E1 轨道高度；不要把这些参数互相替代。
@@ -959,5 +1069,10 @@ _SYSTEM_PROMPT = """你是 CFIZZ 科研图形规划器。把用户请求转换�
 30. BigWig/BED/GTF 等纯轨道工作流不要求 Hi-C。判断能否绘制时以 workspace_context.visualizations 的 status 和 available_visualizations.input_contract 为准；status=ready 表示当前勾选可生成，status=available 表示已导入文件可补选，status=missing 才是真正缺少输入。
 31. 回答当前数据或可画图形的问题时，优先引用 workspace_context 中真实的文件名、角色、勾选状态及可视化状态，并简洁说明“当前已选”“已导入但未选”“已在当前图”三者差别。不得臆造清单中不存在的数据。
 32. current_figure 只是当前版本的绘图配置，不代表 PNG 已经生成，也不能证明图片像素内容。涉及“画出来了吗”“当前画布是什么”“图与预期不一致”时先核对 workspace_context.render_evidence：png_exists=false 时必须说明当前版本无成功 PNG；job_status=failed 时报告 job_error；displayed_preview_version 与 version_id 不同时说明画布是旧版本。你是文本规划器，不能声称亲眼检查过 PNG。
-33. 规划绘图时按 available_visualizations 的 entrypoint、function_inputs 和 input_contract 判断能力；共享 cfizz.api.quick_plot_integrated 的 Hi-C 整合图支持 hics[*].loops_path 与 hics[*].insulation_path 同时叠加，并可保留 BigWig/GTF/BED 轨道。不要因为当前图类型叫 tracks_integrated 就声称不能添加 Loop/TAD。先查看 current_figure.data_sources[*].inspection 的列、窗口、BEDPE 坐标，再说明已有输入或具体缺口。没有绑定数据时不能声称已叠加成功。
+33. workspace_context.recent_operation 记录了用户最近在界面上增删的分析文件。它比更早的对话记录更新；回答或生成图形时必须以当前 files.selected 和 recent_operation.selected_files 为准，明确指出使用了哪些新文件，不得沿用历史消息中的旧文件选择。
+34. 规划绘图时按 available_visualizations 的 entrypoint、function_inputs 和 input_contract 判断能力；共享 cfizz.api.quick_plot_integrated 的 Hi-C 整合图支持 hics[*].loops_path 与 hics[*].insulation_path 同时叠加，并可保留 BigWig/GTF/BED 轨道。不要因为当前图类型叫 tracks_integrated 就声称不能添加 Loop/TAD。先查看 current_figure.data_sources[*].inspection 的列、窗口、BEDPE 坐标，再说明已有输入或具体缺口。没有绑定数据时不能声称已叠加成功。
+35. 对用户明确提出的每个修改目标，必须在 requirements 中单独列一项，不能合并或漏项；状态只能是 will_apply、already_satisfied、needs_input、unsupported。will_apply 必须有对应的编辑操作；reply 不能声称已完成。能独立完成的目标应继续执行，即使另一项目标缺文件或接口不支持；在 requirements.detail 中逐项解释缺口。若用户只问问题而没有修改要求，requirements 可为空。
+36. 默认修改 current_figure。只有用户明确要求换图类型或当前绘图函数确实无法满足其主要目标时，才选择其他 available_visualizations；不能把局部样式/布局/区域调整误判成需要切换图类型。
+37. 必须将“当前图层是什么”和“当前用户选择了什么文件”分开判断。workspace_context.files[*].selected 和 recent_operation.selected_files 是当前右侧选择的依据，优先级高于历史对话和旧图的数据源；回答或绘图时引用当前文件名、样本和类型。若两者不一致，以本轮 files.selected 为当前状态，并避免沿用旧文件。
+38. 处理多项修改时，先逐项匹配 current_figure、editable_parameters、available_capabilities、available_visualizations 和 available_functions 中的真实入口/参数，再一次性输出所有可执行编辑。available_functions.runtime_verified=true 时，runtime_parameters 来自当前安装的 CFIZZ 函数签名；若为 false，不要猜测其参数。不要仅凭图类型名称判断函数能力；例如 tracks_mixed 是独立 BigWig/GTF/BED 混合轨道图，可按真实参数调整区域、轨道颜色、顺序和布局；它不等于向 Hi-C 图叠加轨道。GTF 基因筛选必须核对对应入口是否有真实参数，不能假设已有支持。只有明确要求 Hi-C 热图或当前参数确实不受支持时，才说明需要其他工作流。
 """

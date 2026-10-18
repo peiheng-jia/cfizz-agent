@@ -135,7 +135,32 @@ class SimpleIntentInterpreter:
 
         track_order = self._parse_track_order(text, spec)
         if track_order is not None:
+            if track_order.action == "clarify":
+                return track_order
+            color_operations = self._assay_color_operations(text, spec)
+            if color_operations and track_order.action == "patch":
+                combined_patch = dict(track_order.patch)
+                combined_patch["operations"] = [*track_order.patch["operations"], *color_operations]
+                combined_patch["summary"] = f"{track_order.patch.get('summary', '调整轨道顺序')}并按组学类型设置轨道颜色"
+                return IntentResult(
+                    "patch",
+                    f"{track_order.reply}；并按组学类型统一配色。",
+                    combined_patch,
+                    track_order.requires_confirmation,
+                    track_order.planner,
+                )
             return track_order
+
+        color_operations = self._assay_color_operations(text, spec)
+        if color_operations:
+            return IntentResult(
+                "patch",
+                "已按轨道名称识别组学类型，并为可识别的信号轨道设置统一颜色。",
+                {
+                    "summary": "按组学类型设置轨道颜色",
+                    "operations": color_operations,
+                },
+            )
 
         region = self._parse_region(text)
         if region:
@@ -477,13 +502,11 @@ class SimpleIntentInterpreter:
         )
 
     def _parse_track_order(self, text: str, spec: Dict[str, Any]) -> Optional[IntentResult]:
-        """Compile conversational track-order requests into ``move_layer`` ops.
+        """Compile conversational track-order requests into stable layer-ID edits.
 
-        Ordering is a layout edit, not a new plot.  The operation keeps the
-        real layer IDs and is later rendered by CFIZZ's official integrated
-        entrypoint.  The parser intentionally asks for clarification when a
-        short assay name matches multiple tracks (for example two ATAC
-        samples) instead of guessing.
+        Ordering is a layout edit, not a new plot. Explicit sequences use one
+        atomic operation; assay/sample grouping is inferred only from existing
+        labels. Ambiguous single-track moves still ask for clarification.
         """
 
         lowered = text.lower()
@@ -491,7 +514,7 @@ class SimpleIntentInterpreter:
             "顺序", "排序", "排列", "调换", "交换", "互换", "对调",
             "上面", "上方", "前面", "之前", "下面", "下方", "后面", "之后",
             "最上", "顶部", "顶端", "最下", "底部", "最后", "top", "bottom",
-            "above", "below", "before", "after",
+            "above", "below", "before", "after", "靠近", "挨近", "分组", "放在一起",
         )
         if not any(word in lowered for word in order_words):
             return None
@@ -511,13 +534,33 @@ class SimpleIntentInterpreter:
                 unique_mentions.append(layer)
                 seen.add(layer["id"])
 
-        # “按 A、B、C 顺序排列” is compiled as a short chain of moves.  The
-        # patch engine applies them transactionally in the listed order.
+        grouped_order = self._assay_group_order_operation(text, spec)
+        if grouped_order is not None:
+            operation, labels = grouped_order
+            return IntentResult(
+                "patch",
+                f"将按组学类型归组，并按 H1_hESC 在前、HFFc6 在后的顺序排列：{labels}。",
+                {"summary": "按组学类型和样本顺序排列信号轨道", "operations": [operation]},
+            )
+
+        # Apply an explicit list as one atomic layout operation. A chain of
+        # pairwise moves can silently produce a different final order when
+        # the requested sequence differs from the current layer sequence.
         if any(token in lowered for token in ("按", "依次", "顺序排列", "排序为")) and len(unique_mentions) >= 2:
-            operations = [
-                self._move_layer_operation(left, right, spec, before=True)
-                for left, right in zip(unique_mentions, unique_mentions[1:])
-            ]
+            layer_panel_ids = {
+                layer.get("id"): panel.get("id")
+                for panel in spec.get("panels", [])
+                for layer in panel.get("layers", [])
+            }
+            panel_ids = {layer_panel_ids.get(item["id"]) for item in unique_mentions}
+            if len(panel_ids) != 1:
+                return IntentResult("clarify", "这些轨道分布在不同面板，无法直接合并排序；请指定要调整的面板。")
+            ordered_ids = [layer["id"] for layer in unique_mentions]
+            operations = [{
+                "op": "reorder_layers",
+                "panel_id": next(iter(panel_ids)),
+                "layer_ids": ordered_ids,
+            }]
             labels = "、".join(self._layer_label(layer) for layer in unique_mentions)
             return IntentResult(
                 "patch",
@@ -655,6 +698,112 @@ class SimpleIntentInterpreter:
         matches.sort(key=lambda item: item[0])
         return [layer for _, layer in matches]
 
+    def _assay_color_operations(self, text: str, spec: Dict[str, Any]):
+        """Assign consistent, colorblind-friendly colors when explicitly requested."""
+        lowered = text.casefold()
+        if not any(token in lowered for token in (
+            "不同颜色", "不同的颜色", "按组学", "按测序类型", "按技术类型",
+            "按 assay", "颜色区分", "按类型配色", "组学配色",
+        )):
+            return []
+
+        palette = {
+            "atac": "#0072B2",
+            "ctcf": "#E69F00",
+            "h3k27ac": "#009E73",
+            "h3k27me3": "#CC79A7",
+            "h3k27_other": "#56B4E9",
+            "rna": "#D55E00",
+            "other": "#777777",
+        }
+        operations = []
+        for layer in self._track_layers(spec):
+            if layer.get("kind") != "bigwig":
+                continue
+            label = re.sub(r"[\s_\-]+", "", self._layer_label(layer).casefold())
+            if "atac" in label:
+                assay = "atac"
+            elif "ctcf" in label:
+                assay = "ctcf"
+            elif "h3k27ac" in label:
+                assay = "h3k27ac"
+            elif "h3k27me3" in label:
+                assay = "h3k27me3"
+            elif "h3k" in label or "histone" in label:
+                assay = "h3k27_other"
+            elif any(token in label for token in ("rna", "rnaseq")):
+                assay = "rna"
+            else:
+                assay = "other"
+            operations.append({
+                "op": "update",
+                "target_kind": "layer",
+                "target_id": layer["id"],
+                "field": "style.color",
+                "value": palette[assay],
+            })
+        return operations
+
+    def _assay_group_order_operation(self, text: str, spec: Dict[str, Any]):
+        """Infer a stable assay/sample grouping from explicit natural-language criteria."""
+        lowered = text.casefold()
+        asks_grouping = any(token in lowered for token in (
+            "按组学", "按测序类型", "按技术类型", "同类", "同一种技术", "同组学",
+            "挨在一起", "放在一起", "靠近", "挨近", "分组",
+        ))
+        asks_sample_order = (
+            ("h1" in lowered or "h1_hesc" in lowered)
+            and ("hffc6" in lowered or "hffc" in lowered)
+            and any(token in lowered for token in ("上", "前", "先", "下", "后"))
+        )
+        if not asks_grouping or not asks_sample_order:
+            return None
+
+        bigwigs = [layer for layer in self._track_layers(spec) if layer.get("kind") == "bigwig"]
+        if len(bigwigs) < 2:
+            return None
+        layer_panel_ids = {
+            layer.get("id"): panel.get("id")
+            for panel in spec.get("panels", [])
+            for layer in panel.get("layers", [])
+        }
+        panel_ids = {layer_panel_ids.get(layer["id"]) for layer in bigwigs}
+        if len(panel_ids) != 1 or None in panel_ids:
+            return None
+
+        assay_rank = {"atac": 0, "ctcf": 1, "h3k27ac": 2, "h3k27me3": 3, "h3k27_other": 4, "rna": 5, "other": 6}
+
+        def assay_group(layer):
+            label = re.sub(r"[\s_\-]+", "", self._layer_label(layer).casefold())
+            for token in ("atac", "ctcf", "h3k27ac", "h3k27me3"):
+                if token in label:
+                    return token
+            if "h3k" in label or "histone" in label:
+                return "h3k27_other"
+            if "rna" in label:
+                return "rna"
+            return "other"
+
+        def sample_rank(layer):
+            label = re.sub(r"[\s_\-]+", "", self._layer_label(layer).casefold())
+            if "h1hesc" in label or re.search(r"(?:^|[^a-z0-9])h1(?:[^a-z0-9]|$)", self._layer_label(layer).casefold()):
+                return 0
+            if "hffc6" in label or "hffc" in label:
+                return 1
+            return 2
+
+        original_index = {layer["id"]: index for index, layer in enumerate(bigwigs)}
+        ordered = sorted(
+            bigwigs,
+            key=lambda layer: (assay_rank[assay_group(layer)], sample_rank(layer), original_index[layer["id"]]),
+        )
+        labels = "、".join(self._layer_label(layer) for layer in ordered)
+        return ({
+            "op": "reorder_layers",
+            "panel_id": next(iter(panel_ids)),
+            "layer_ids": [layer["id"] for layer in ordered],
+        }, labels)
+
     def _resolve_track_expression(self, expression: str, spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         lowered = expression.casefold().strip(" ：:，,。！？!?\t")
         layers = self._track_layers(spec)
@@ -711,19 +860,25 @@ class SimpleIntentInterpreter:
         """Recognize retired Agent figures so they cannot fall back to a wrong plot."""
         compact = re.sub(r"\s+", "", str(text or "").casefold())
         retired_ids = {
-            "hic_oe": ("O/E 热图", "O/E 数据仍可作为 A/B Compartment 对比的输入，但不再单独生成 O/E 图。"),
-            "compartment_eigenvector": ("E1 特征向量轨道", "如需查看区室结果，请改用 A/B Compartment 区域图或多样本 Compartment 对比。"),
+            "hic_oe": ("O/E 热图", "O/E 矩阵可由单样本 Compartment 工作流根据 cool/mcool 计算；Agent 不单独生成 O/E 图。"),
+            "compartment_multi": ("多样本 Compartment 对比", "当前 Agent 暂不提供多样本 Compartment 对比；单样本 A/B Compartment 区域图仍可使用。"),
+            "compartment_eigenvector": ("E1 特征向量轨道", "如需查看区室结果，请改用单样本 A/B Compartment 区域图。"),
             "tad_insulation_track": ("Insulation score 轨道", "如需查看 TAD，请改用 TAD 边界区域图或多样本 TAD 边界对比。"),
             "tad_boundary_square": ("方形 Hi-C + TAD 边界", "如需查看 TAD，请改用三角 Hi-C 的 TAD 边界区域图。"),
         }
         for figure_id, reply in retired_ids.items():
             if figure_id in compact:
                 return reply
+        if any(token in compact for token in (
+            "多样本compartment", "compartment多样本", "多样本区室对比", "多样本区室比较",
+            "multisamplecompartment", "multi-samplecompartment", "compartmentcomparison",
+        )):
+            return "多样本 Compartment 对比", "当前 Agent 暂不提供多样本 Compartment 对比；单样本 A/B Compartment 区域图仍可使用。"
         compartment_context = any(token in compact for token in ("compartment", "区室", "a/b", "a／b"))
         if not compartment_context and any(token in compact for token in ("o/e", "oe图", "oe热图", "oe矩阵", "observed/expected")):
-            return "O/E 热图", "O/E 数据仍可作为 A/B Compartment 对比的输入，但不再单独生成 O/E 图。"
+            return "O/E 热图", "O/E 矩阵可由单样本 Compartment 工作流根据 cool/mcool 计算；Agent 不单独生成 O/E 图。"
         if any(token in compact for token in ("e1", "特征向量", "eigenvector")) and any(token in compact for token in ("轨道", "单独", "standalone", "track")):
-            return "E1 特征向量轨道", "如需查看区室结果，请改用 A/B Compartment 区域图或多样本 Compartment 对比。"
+            return "E1 特征向量轨道", "如需查看区室结果，请改用单样本 A/B Compartment 区域图。"
         if any(token in compact for token in ("insulation", "绝缘分数")) and any(token in compact for token in ("轨道", "单独", "standalone", "track")):
             return "Insulation score 轨道", "如需查看 TAD，请改用 TAD 边界区域图或多样本 TAD 边界对比。"
         if any(token in compact for token in ("tad", "边界", "boundary")) and any(token in compact for token in ("方形", "square")):
@@ -770,7 +925,7 @@ class SimpleIntentInterpreter:
     @staticmethod
     def _parse_region(text: str):
         match = re.search(
-            r"(chr[\w.-]+|\b\d{1,2}\b|[XYM])\s*[:：]\s*([\d,.]+)\s*([kKmM]?)(?:bp|b)?\s*[-–—到]\s*([\d,.]+)\s*([kKmM]?)(?:bp|b)?",
+            r"(chr[0-9A-Za-z_.-]+|\b\d{1,2}\b|[XYM])\s*(?:[:：]|的)?\s*([\d,.]+)\s*([kKmM]?)(?:bp|b)?\s*[-–—到]\s*([\d,.]+)\s*([kKmM]?)(?:bp|b)?",
             text,
         )
         if not match:

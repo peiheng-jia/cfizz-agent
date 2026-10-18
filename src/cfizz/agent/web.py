@@ -1463,31 +1463,69 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                 service.pending_actions.pop(session_id, None)
                 intent = IntentResult("answer", "已取消这次绘图选择，没有修改当前图。", planner="chat:workflow")
             else:
-                chosen_path = _chat_resolve_workflow_choice(stored_pending, body.message)
-                if chosen_path:
+                replacement_edit = _specific_gene_track_intent(
+                    service,
+                    session,
+                    body.message,
+                    body.dataset_selection.model_dump() if body.dataset_selection else None,
+                )
+                if replacement_edit is None:
+                    replacement_edit = _explicit_region_change_intent(service, session, body.message)
+                if replacement_edit is not None:
                     service.pending_actions.pop(session_id, None)
-                    choice_request = deepcopy(stored_pending.get("request") or {})
-                    choice_request["explicit_paths"] = [chosen_path]
-                    intent = _chat_workflow_confirmation(service, session, choice_request)
+                    intent = replacement_edit
                 else:
-                    labels = "、".join(
-                        str(option.get("sample") or option.get("name") or "")
-                        for option in stored_pending.get("options") or []
+                    replacement_request = _chat_workflow_request(
+                        body.message,
+                        history,
+                        session,
+                        workspace_selection=body.dataset_selection.model_dump() if body.dataset_selection else None,
                     )
-                    intent = IntentResult(
-                        "clarify",
-                        f"请从以下样本中选择一个：{labels}。可以直接回复样本名、完整文件名，或“第一个/第二个”。",
-                        planner="chat:workflow",
-                    )
+                    if replacement_request is not None:
+                        # A new drawing instruction supersedes an unresolved
+                        # one-of-many choice instead of answering a stale prompt.
+                        service.pending_actions.pop(session_id, None)
+                    else:
+                        chosen_path = _chat_resolve_workflow_choice(stored_pending, body.message)
+                        if chosen_path:
+                            service.pending_actions.pop(session_id, None)
+                            choice_request = deepcopy(stored_pending.get("request") or {})
+                            choice_request["explicit_paths"] = [chosen_path]
+                            intent = _chat_workflow_confirmation(service, session, choice_request)
+                        else:
+                            labels = "、".join(
+                                str(option.get("sample") or option.get("name") or "")
+                                for option in stored_pending.get("options") or []
+                            )
+                            intent = IntentResult(
+                                "clarify",
+                                f"请从以下样本中选择一个：{labels}。可以直接回复样本名、完整文件名，或“第一个/第二个”；如果想改成其他绘图请求，直接说明即可。",
+                                planner="chat:workflow",
+                            )
         elif confirmation or cancellation:
             pending = service.pending_actions.pop(session_id, None)
         # Explicit drawing requests start immediately.  The only conversational
         # pause is a real one-of-many input choice; once the user names that
         # sample/file, the workflow is applied and rendered in the same turn.
         if intent is None and not confirmation and not cancellation:
+            intent = _specific_gene_track_intent(
+                service,
+                session,
+                body.message,
+                body.dataset_selection.model_dump() if body.dataset_selection else None,
+            )
+        if intent is None and not confirmation and not cancellation:
+            intent = _explicit_region_change_intent(
+                service,
+                session,
+                body.message,
+            )
+        if intent is None and not confirmation and not cancellation:
             intent = _insulation_window_intent(service, session.current_spec, body.message)
         if intent is None and not confirmation and not cancellation:
             intent = _render_diagnostic_intent(service, session, body.message, body.workspace_context)
+        if intent is None and not confirmation and not cancellation:
+            intent = _explicit_overlay_binding_intent(service, session, body.message)
         if intent is None and not confirmation and not cancellation:
             intent = _integrated_overlay_intent(service, session, body.message, body.workspace_context)
         if intent is None and pending is not None and pending.get("kind") == "workflow":
@@ -1604,6 +1642,43 @@ def create_app(project_root: Optional[str] = None, runtime_root: Optional[str] =
                 "AI 服务没有返回可用的理解结果（接口返回 Not Found）。请检查 API 地址和模型名称后重试；也可以先切换到本地规则。",
                 planner=f"{intent.planner}:invalid-response",
             )
+
+        # A plot request must bind against the right-pane selection as it is
+        # now.  A figure-type patch or a plain "redraw" used to reuse the
+        # FigureSpec's old sources, even when the user had changed files in
+        # the workspace after the previous render.
+        if body.dataset_selection is not None and intent.action in {"patch", "render"}:
+            selected_figure_type = str(session.current_spec.get("figure_type") or "") if intent.action == "render" else ""
+            if intent.action == "patch":
+                for operation in (intent.patch or {}).get("operations", []):
+                    if (
+                        isinstance(operation, dict)
+                        and operation.get("op") == "update"
+                        and operation.get("target_kind") == "figure"
+                        and operation.get("field") == "figure_type"
+                    ):
+                        selected_figure_type = str(operation.get("value") or "")
+                        break
+            if selected_figure_type in FIGURE_TYPE_BY_ID:
+                workspace_selection = body.dataset_selection.model_dump()
+                selected_paths = workspace_selection.get("selected_paths") or []
+                if not selected_paths:
+                    intent = IntentResult(
+                        "clarify",
+                        "右侧当前没有选中的分析文件。请先选择要使用的文件，再重新绘图；我不会继续使用上一次的旧文件。",
+                        planner=f"{intent.planner}:current-selection-required",
+                    )
+                else:
+                    current_request = _chat_workflow_request(
+                        body.message,
+                        history,
+                        session,
+                        figure_type_override=selected_figure_type,
+                        allow_without_draw_words=True,
+                        workspace_selection=workspace_selection,
+                    )
+                    if current_request is not None:
+                        intent = _chat_workflow_confirmation(service, session, current_request)
 
         # The external planner receives redacted paths for privacy, so it
         # cannot itself bind a local file.  When it nevertheless identifies a
@@ -2011,6 +2086,106 @@ def _render_diagnostic_intent(
     if stale_preview:
         parts.append("请以新版本任务完成后更新的画布为准；旧预览不应被当作新图。")
     return IntentResult("answer", " ".join(parts), planner="render:verified")
+
+
+def _explicit_overlay_binding_intent(
+    service: WorkspaceService,
+    session: FigureSession,
+    message: str,
+) -> Optional[IntentResult]:
+    """Apply explicit sample → overlay-file pairs to the current Hi-C figure.
+
+    This is a narrow edit path: it only binds files already present in the
+    current FigureSpec and keeps its viewport, tracks, and other settings.
+    """
+    spec = session.current_spec
+    figure_type = str(spec.get("figure_type") or "")
+    if figure_type not in {"tracks_integrated", "hic_multiome"}:
+        return None
+    arrows = list(re.finditer(r"(?P<left>[^,，;；\n]+?)\s*(?:→|->|=>)\s*(?P<right>[^,，;；\n]+)", message))
+    if not arrows:
+        return None
+    compact = re.sub(r"\s+", "", message).casefold()
+    roles = []
+    if "loop" in compact or "环" in compact:
+        roles.append(("loops", "loops_path", "Loop"))
+    if any(token in compact for token in ("insulation", "tad", "绝缘", "边界")):
+        roles.append(("insulation", "insulation_path", "insulation/TAD"))
+    if not roles:
+        return None
+
+    def sample_key(value: Any) -> str:
+        name = Path(str(value or "")).name
+        name = re.sub(r"\.(?:txt|tsv|bedpe|bed|gz)$", "", name, flags=re.IGNORECASE)
+        name = re.sub(
+            r"(?i)(?:[._-]hic)?[._-]\d+(?:k|kb|bp)?[._-](?:loops?|insulation|boundaries?)$", "", name
+        )
+        name = re.sub(r"(?i)(?:[._-](?:hic)?[._-]?(?:loops?|insulation|boundaries?))$", "", name)
+        return re.sub(r"[^a-z0-9]+", "", name.casefold())
+
+    layers = [
+        layer for panel in spec.get("panels", []) for layer in panel.get("layers", [])
+        if layer.get("kind") == "hic" and layer.get("visible", True)
+    ]
+    sources = {str(source.get("id")): source for source in spec.get("data_sources", []) if isinstance(source, dict)}
+    selected = set(spec.get("workflow_source_ids") or [])
+    operations = []
+    summaries = []
+    for role, field, label in roles:
+        candidates = [
+            source for source in sources.values()
+            if source.get("role") == role and (not selected or source.get("id") in selected)
+        ]
+        used_layers = set()
+        for arrow in arrows:
+            left = arrow.group("left").strip().strip(" `'\"“”‘’")
+            right = arrow.group("right").strip().strip(" `'\"“”‘’")
+            mentioned = [
+                source for source in candidates
+                if Path(str(source.get("path") or "")).name.casefold() in right.casefold()
+                or Path(str(source.get("path") or "")).stem.casefold() in right.casefold()
+            ]
+            if len(mentioned) != 1:
+                continue
+            candidate = mentioned[0]
+            layer_matches = []
+            for layer in layers:
+                source = sources.get(str(layer.get("source_id"))) or {}
+                aliases = {sample_key(source.get("sample")), sample_key(source.get("label")), sample_key(Path(str(source.get("path") or "")).stem)}
+                requested = sample_key(left)
+                if requested and requested in aliases:
+                    layer_matches.append(layer)
+            if len(layer_matches) != 1 or layer_matches[0].get("id") in used_layers:
+                continue
+            layer = layer_matches[0]
+            report = service.inspector.inspect(str(candidate["path"]), candidate.get("type"))
+            if not report.usable:
+                return IntentResult("clarify", f"{Path(candidate['path']).name} 无法读取：{report.error}", planner="overlay:explicit-binding")
+            if role == "loops" and (report.metadata.get("columns") or not report.metadata.get("bedpe_coordinate_rows")):
+                return IntentResult("clarify", f"{Path(candidate['path']).name} 缺少可用的无表头 BEDPE 六列坐标，不能作为 Loop 标注。", planner="overlay:explicit-binding")
+            if role == "insulation":
+                windows = common_insulation_windows((report.path,))
+                if not windows:
+                    return IntentResult("clarify", f"{Path(candidate['path']).name} 缺少可用的 insulation score 与 boundary 列。", planner="overlay:explicit-binding")
+                current = (layer.get("style") or {}).get("window_size")
+                if current not in windows:
+                    window = 100_000 if 100_000 in windows else windows[0]
+                    operations.append({"op": "update", "target_kind": "layer", "target_id": layer["id"], "field": "style.window_size", "value": window})
+            operations.append({"op": "update", "target_kind": "layer", "target_id": layer["id"], "field": f"style.{field}", "value": report.path})
+            used_layers.add(layer.get("id"))
+            sample = (sources.get(str(layer.get("source_id"))) or {}).get("sample") or left
+            summaries.append(f"{sample} → {Path(candidate['path']).name}")
+        if not summaries:
+            continue
+
+    if not operations:
+        return None
+    return IntentResult(
+        "patch",
+        f"已按明确配对绑定 {label if len(roles) == 1 else 'Loop/TAD'} 文件：{'；'.join(summaries)}。当前图的区域、其他轨道和样式保持不变，正在重新绘图。",
+        {"summary": "按明确样本配对更新当前 Hi-C 标注", "operations": operations},
+        planner="overlay:explicit-binding",
+    )
 
 
 def _integrated_overlay_intent(
@@ -2439,7 +2614,7 @@ def _chat_workflow_type(message: str) -> Optional[str]:
         if any(token in text for token in ("saddle", "鞍形", "鞍")):
             return "compartment_saddle"
         if multi:
-            return "compartment_multi"
+            return None
         return "compartment"
 
     if "tad" in text or "绝缘" in text or "边界" in text:
@@ -2486,10 +2661,42 @@ def _chat_workflow_type(message: str) -> Optional[str]:
             return "hic_triangle_multi"
         if multi and any(token in text for token in ("方形", "square")):
             return "hic_multi"
+        if multi:
+            # Generic Hi-C comparison keeps the current chart geometry when
+            # it is known; otherwise choose the canonical square comparison.
+            return "hic_multi"
         if any(token in text for token in ("方形", "square")):
             return "hic_square"
         return "hic_triangle"
     return None
+
+
+def _chat_contextual_hic_comparison_type(
+    message: str,
+    session: FigureSession,
+    workspace_selection: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Resolve a generic comparison request from the active figure and checked HIC files."""
+    text = re.sub(r"\s+", "", str(message or "")).casefold()
+    if not any(token in text for token in ("对比", "比较", "样本对比", "comparison")):
+        return None
+    if any(token in text for token in ("tad", "loop", "compartment", "区室", "边界", "绝缘")):
+        return None
+    selection = workspace_selection if isinstance(workspace_selection, dict) else {}
+    selected_paths = [
+        str(path) for path in selection.get("selected_paths", [])
+        if isinstance(path, str) and path.strip()
+    ]
+    hic_paths = [
+        path for path in selected_paths
+        if re.search(r"(?i)\.(?:mcool|cool)$", re.split(r"[\\/]", path)[-1])
+    ]
+    if len(hic_paths) < 2:
+        return None
+    current = str(session.current_spec.get("figure_type") or "")
+    if current in {"hic_triangle", "hic_triangle_multi"}:
+        return "hic_triangle_multi"
+    return "hic_multi"
 
 
 def _chat_path_parent(raw_path: str) -> str:
@@ -2566,9 +2773,17 @@ def _chat_workflow_request(
     workspace_selection: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Parse a chat-only workflow request before the general AI intent path."""
-    figure_type = figure_type_override or _chat_workflow_type(message)
-    explicit_paths, directory = _chat_extract_paths(message)
+    selection = workspace_selection if isinstance(workspace_selection, dict) else {}
     compact = re.sub(r"\s+", "", str(message or "")).casefold()
+    figure_type = figure_type_override or _chat_workflow_type(message)
+    contextual_comparison_type = _chat_contextual_hic_comparison_type(message, session, selection)
+    explicit_geometry = any(token in compact for token in ("三角", "triangle", "方形", "square"))
+    if contextual_comparison_type and (
+        figure_type is None
+        or (figure_type in {"hic_multi", "hic_triangle_multi"} and not explicit_geometry)
+    ):
+        figure_type = contextual_comparison_type
+    explicit_paths, directory = _chat_extract_paths(message)
     draw_words = ("画", "绘制", "生成", "可视化", "出图", "plot", "draw", "visualiz", "workflow")
     # A short answer such as “TAD 图吧” or “就选三角 Hi-C 热图” is an
     # explicit catalogue choice even though it does not repeat the verb
@@ -2590,7 +2805,6 @@ def _chat_workflow_request(
     # The persistent data browser is the most precise source of pronouns such
     # as “这两个” because it records the files the user has actually checked.
     # Keep paths out of the model prompt, but bind them locally here.
-    selection = workspace_selection if isinstance(workspace_selection, dict) else {}
     selected_paths = [value.strip() for value in selection.get("selected_paths", []) if isinstance(value, str) and value.strip()]
     source_paths = [value.strip() for value in selection.get("source_paths", []) if isinstance(value, str) and value.strip()]
     if directory is None and not explicit_paths and selected_paths:
@@ -3438,7 +3652,7 @@ def _resolve_ai_workflow_intent(session: FigureSession, intent: IntentResult) ->
     selected_sources = [source for source in sources if not source_ids or source.get("id") in source_ids]
     selected_hics = [source for source in selected_sources if source.get("type") in {"cool", "mcool"}]
     minimum_hics = {
-        "hic_multi": 2, "compartment_multi": 2, "tad_multi": 2,
+        "hic_multi": 2, "tad_multi": 2,
         "loop_multi": 2, "loop_apa_multi": 2,
         "compartment_diff_region": 2, "tad_diff_region": 2,
         "loop_diff_region": 2, "tad_diff_pileup": 2, "loop_diff_apa": 2,
@@ -4082,7 +4296,166 @@ def _region_gene_annotation_intent(
     )
 
 
-def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, message: str) -> Optional[IntentResult]:
+def _specific_gene_track_intent(
+    service: WorkspaceService,
+    session: FigureSession,
+    message: str,
+    workspace_selection: Optional[Dict[str, Any]] = None,
+) -> Optional[IntentResult]:
+    """Handle a precise request to show only one named gene in a GTF track."""
+    match = re.search(
+        r"(?:只|仅)(?:显示|画|保留|标注|留下)\s*([A-Za-z][A-Za-z0-9_.-]{1,39})"
+        r"\s*(?:这?一个)?\s*(?:gene|基因)",
+        str(message or ""),
+        re.I,
+    )
+    if not match:
+        return None
+    gene = match.group(1).upper()
+    selected_annotation = None
+    selected_paths = (workspace_selection or {}).get("selected_paths", [])
+    if isinstance(selected_paths, list):
+        candidates = [
+            str(path) for path in selected_paths
+            if isinstance(path, str) and re.search(r"(?i)\.gtf(?:\.gz)?$", path)
+        ]
+        active_gene_layer = next(
+            (
+                layer for panel in session.current_spec.get("panels", [])
+                for layer in panel.get("layers", []) if layer.get("kind") == "genes"
+            ),
+            None,
+        )
+        active_gene_source = next(
+            (
+                source for source in session.current_spec.get("data_sources", [])
+                if isinstance(source, dict) and active_gene_layer
+                and source.get("id") == active_gene_layer.get("source_id")
+            ),
+            None,
+        )
+        active_path = None
+        if active_gene_source:
+            active_path = active_gene_source.get("annotation_source_path") or active_gene_source.get("path")
+        selected_annotation = next(
+            (path for path in candidates if active_path and Path(path).name == Path(str(active_path)).name),
+            None,
+        )
+        if selected_annotation is None and len(candidates) == 1:
+            selected_annotation = candidates[0]
+        if len(candidates) > 1 and selected_annotation is None:
+            labels = "、".join(Path(path).name for path in candidates[:5])
+            return IntentResult(
+                "clarify",
+                f"当前选中了多个 GTF 文件（{labels}）。请在右侧只选一个要筛选的 GTF，再重试；没有修改图形。",
+                planner="reference:ambiguous-gtf",
+            )
+    return _gene_annotation_intent(
+        service,
+        session,
+        f"只显示 {gene} 基因",
+        selected_annotation_path=selected_annotation,
+    )
+
+
+def _explicit_region_change_intent(
+    service: WorkspaceService,
+    session: FigureSession,
+    message: str,
+) -> Optional[IntentResult]:
+    """Apply a stated genomic interval as a viewport-only edit after validation."""
+    region = SimpleIntentInterpreter._parse_region(message)
+    if region is None:
+        return None
+    chrom, start, end = region
+    spec = session.current_spec
+    sources = {
+        str(source.get("id")): source
+        for source in spec.get("data_sources", [])
+        if isinstance(source, dict) and source.get("id")
+    }
+    active_ids = {
+        str(layer.get("source_id"))
+        for panel in spec.get("panels", []) if isinstance(panel, dict)
+        for layer in panel.get("layers", []) if isinstance(layer, dict) and layer.get("visible", True)
+    }
+    active_sources = [sources[source_id] for source_id in active_ids if source_id in sources]
+    active_hic = [source for source in active_sources if source.get("type") in {"cool", "mcool"}]
+    matrix_evidence: list[str] = []
+    track_evidence: list[str] = []
+    for source in active_hic:
+        result = service.inspector.inspect(str(source.get("path") or ""), str(source.get("type") or ""))
+        label = str(source.get("label") or Path(str(source.get("path") or "Hi-C 文件")).name)
+        if not result.usable:
+            return IntentResult(
+                "clarify",
+                f"无法验证当前 Hi-C 文件 {label}：{result.error or '文件不可读取'}。我没有修改区域或其他参数。",
+                planner="viewport:data-check",
+            )
+        chromsizes = result.metadata.get("chromsizes") or {}
+        matched_chrom = normalize_chromosome(chrom, result.metadata.get("chromosomes", []))
+        if not matched_chrom:
+            return IntentResult(
+                "clarify",
+                f"当前图使用的 Hi-C 文件 {label} 不包含 {chrom}。我没有切换视野；请确认当前选中的 Hi-C 文件或染色体名称。",
+                planner="viewport:data-check",
+            )
+        if matched_chrom in chromsizes and end > int(chromsizes[matched_chrom]):
+            return IntentResult(
+                "clarify",
+                f"当前图使用的 Hi-C 文件 {label} 中 {matched_chrom} 长度为 {int(chromsizes[matched_chrom]):,} bp，"
+                f"请求终点 {end:,} 超出范围。我没有修改当前图。",
+                planner="viewport:data-check",
+            )
+        matrix_evidence.append(label)
+    for source in active_sources:
+        if source.get("type") in {"cool", "mcool"}:
+            continue
+        result = service.inspector.inspect(str(source.get("path") or ""), str(source.get("type") or ""))
+        label = str(source.get("label") or Path(str(source.get("path") or "轨道文件")).name)
+        chromosomes = result.metadata.get("chromosomes", []) if result.usable else []
+        matched_chrom = normalize_chromosome(chrom, chromosomes) if chromosomes else None
+        inspection_level = result.metadata.get("inspection_level")
+        if inspection_level == "full" and chromosomes and not matched_chrom:
+            track_evidence.append(f"{label} 未包含 {chrom}，该轨道在新视野可能为空")
+        elif inspection_level == "sampled":
+            if matched_chrom:
+                track_evidence.append(f"{label} 的已扫描部分含 {chrom}，其余文件内容未完全核验")
+            else:
+                track_evidence.append(f"{label} 只扫描了部分内容，无法判断是否含 {chrom}")
+        elif result.usable and matched_chrom:
+            track_evidence.append(f"{label} 含 {chrom}")
+        elif not result.usable:
+            track_evidence.append(f"{label} 未能读取核验")
+    operation_patch = {
+        "summary": f"调整区域到 {chrom}:{start}-{end}",
+        "operations": [
+            {"op": "update", "target_kind": "viewport", "field": "chrom", "value": chrom},
+            {"op": "update", "target_kind": "viewport", "field": "start", "value": start},
+            {"op": "update", "target_kind": "viewport", "field": "end", "value": end},
+        ],
+    }
+    matrix_note = (
+        f"已检查当前图使用的 Hi-C 文件：{'、'.join(matrix_evidence)}，染色体和坐标范围均有效。"
+        if matrix_evidence else "当前图没有活动的 Hi-C 矩阵；按请求更新轨道视野。"
+    )
+    track_note = f"轨道检查：{'；'.join(track_evidence)}。" if track_evidence else ""
+    return IntentResult(
+        "patch",
+        f"将视野调整到 {chrom}:{start:,}-{end:,}。{matrix_note}{track_note}"
+        "只修改视野，保留当前文件、分辨率和导出 DPI。",
+        operation_patch,
+        planner="viewport:data-check",
+    )
+
+
+def _gene_annotation_intent(
+    service: WorkspaceService,
+    session: FigureSession,
+    message: str,
+    *,
+    selected_annotation_path: Optional[str] = None,
+) -> Optional[IntentResult]:
     """Add a bundled/reference GTF track when the current figure lacks one."""
     spec = session.current_spec
     build = _session_reference_build(session)
@@ -4090,14 +4463,55 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
     # Prefer a GTF already attached to the current figure (for example, one
     # discovered from a user's data directory), then fall back to the bundled
     # annotation available for the selected reference build.
-    annotation_path = next(
+    existing_gene_layer = next(
         (
-            source.get("path")
-            for source in spec.get("data_sources", [])
-            if isinstance(source, dict) and source.get("type") in {"gtf", "gff"} and source.get("path")
+            layer
+            for panel in spec.get("panels", [])
+            for layer in panel.get("layers", [])
+            if layer.get("kind") == "genes"
         ),
         None,
     )
+    annotation_sources = [
+        source for source in spec.get("data_sources", [])
+        if isinstance(source, dict) and source.get("type") in {"gtf", "gff"} and source.get("path")
+    ]
+    existing_gene_source = next(
+        (
+            source for source in annotation_sources
+            if existing_gene_layer and source.get("id") == existing_gene_layer.get("source_id")
+        ),
+        None,
+    )
+    annotation_path = selected_annotation_path
+    if not annotation_path and existing_gene_source:
+        annotation_path = existing_gene_source.get("annotation_source_path") or existing_gene_source.get("path")
+    if not annotation_path and annotation_sources:
+        annotation_path = annotation_sources[0].get("annotation_source_path") or annotation_sources[0].get("path")
+    if annotation_path:
+        try:
+            annotation_path = str(service.inspector.resolve_path(str(annotation_path)))
+            if selected_annotation_path:
+                selected_annotation_path = annotation_path
+        except (OSError, PermissionError) as exc:
+            return IntentResult(
+                "clarify",
+                f"当前选中的 GTF 文件无法读取：{exc}。没有修改图形。",
+                planner=f"reference:{build}:annotation-check",
+            )
+        if (
+            not selected_annotation_path
+            and not (existing_gene_source or {}).get("annotation_source_path")
+            and any(
+                token in annotation_path.replace("\\", "/")
+                for token in ("/regions/", "/selected_genes/")
+            )
+        ):
+            # This is a previous derived region subset, not a complete
+            # annotation source.  Let the reference registry find another
+            # gene in its complete annotation instead of treating the subset
+            # as the user's original GTF.
+            annotation_path = None
     lowered_message = message.lower()
     explicit = re.search(r"([A-Za-z][A-Za-z0-9-]{1,19})", message)
     if explicit and explicit.group(1).upper() in {"GENE", "TRACK", "ANNOTATION"}:
@@ -4135,7 +4549,7 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
     if not gene_drawing_command and not any(token in lowered_message for token in ("标注", "标上", "基因注释", "基因轨道", "gene annotation", "gene track")):
         return None
     current_figure_type = spec.get("figure_type")
-    if not supports_integrated_tracks(current_figure_type):
+    if not supports_integrated_tracks(current_figure_type) and current_figure_type not in {"tracks_genes", "tracks_mixed"}:
         item = FIGURE_TYPE_BY_ID.get(str(current_figure_type)) or {}
         return IntentResult(
             "answer",
@@ -4177,22 +4591,30 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
             reply = f"当前选择 {reference_label}；请先导入匹配 {build} 的 GTF/GFF，才能按基因名标注 {gene}。"
         return IntentResult("answer", reply, planner=f"reference:{build}")
 
+    track_annotation_path = annotation_path or location.annotation_path
+    if (
+        selected_annotation_path
+        and location.annotation_path
+        and Path(location.annotation_path).resolve() != Path(selected_annotation_path).resolve()
+    ):
+        return IntentResult(
+            "clarify",
+            f"当前选中的 GTF 文件 {Path(selected_annotation_path).name} 中没有找到 {gene}；"
+            "我没有改用其他参考文件，也没有修改图形。",
+            planner=f"reference:{build}:selected-gtf",
+        )
+
     sources = spec.get("data_sources", [])
     has_gene_track = any(layer.get("kind") == "genes" for panel in spec.get("panels", []) for layer in panel.get("layers", []))
     # A previous version could have added the track while leaving the window
     # on chr1:0-2M.  Treat a repeat annotation request as a request to move
     # that existing track into view, rather than returning a misleading
     # "already present" answer.
-    source_id = f"reference_genes_{build}"
-    reference_source_label = f"Genes · {reference_label}"
-    existing_gene_layer = next(
-        (
-            layer
-            for panel in spec.get("panels", [])
-            for layer in panel.get("layers", [])
-            if layer.get("kind") == "genes"
-        ),
-        None,
+    source_id = str(existing_gene_source.get("id")) if existing_gene_source else f"reference_genes_{build}"
+    reference_source_label = (
+        f"Genes · {Path(str(annotation_path)).name}"
+        if annotation_path and not annotation_path.startswith(str(service.references.cache_root / "selected_genes"))
+        else f"Genes · {reference_label}"
     )
     layer = {
         "id": "reference_genes_layer", "kind": "genes", "source_id": source_id,
@@ -4211,6 +4633,7 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
     operations.append({"op": "update", "target_kind": "viewport", "field": "focus_label", "value": gene})
     if not _region_overlaps(current_viewport, location.chrom, location.start, location.end):
         supported_chrom = None
+        inspection = None
         for source in spec.get("data_sources", []):
             if not isinstance(source, dict) or source.get("type") not in {"cool", "mcool"}:
                 continue
@@ -4218,6 +4641,10 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
             supported_chrom = normalize_chromosome(location.chrom, inspection.metadata.get("chromosomes", []))
             if supported_chrom:
                 break
+        if not supported_chrom and current_figure_type in {"tracks_genes", "tracks_mixed"}:
+            # Standalone annotation tracks do not require a Hi-C matrix; the
+            # selected GTF itself established the target gene's chromosome.
+            supported_chrom = location.chrom
         if not supported_chrom:
             return IntentResult(
                 "answer",
@@ -4225,7 +4652,7 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
                 planner=f"reference:{build}",
             )
         flank = 500_000
-        chrom_sizes = inspection.metadata.get("chromsizes", {})
+        chrom_sizes = (inspection.metadata.get("chromsizes", {}) if inspection else {})
         start = max(0, location.start - flank)
         end = location.end + flank
         if supported_chrom in chrom_sizes:
@@ -4237,12 +4664,25 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
             {"op": "update", "target_kind": "viewport", "field": "end", "value": end},
         ])
     try:
-        track_path = service.references.annotation_track(location, target_start, target_end)
+        if track_annotation_path and Path(track_annotation_path).name.lower().endswith((".gtf", ".gtf.gz", ".gtf.bgz")):
+            track_path = service.references.single_gene_gtf_track(
+                track_annotation_path,
+                gene,
+                location.chrom,
+                target_start,
+                target_end,
+            )
+        else:
+            track_path = service.references.annotation_track(location, target_start, target_end)
     except ValueError as exc:
         return IntentResult("answer", str(exc), planner=f"reference:{build}")
     if not has_gene_track:
         operations.extend([
-            {"op": "add_source", "source": {"id": source_id, "type": "gtf", "path": track_path, "label": reference_source_label}},
+            {"op": "add_source", "source": {
+                "id": source_id, "type": "gtf", "path": track_path,
+                "label": reference_source_label,
+                **({"annotation_source_path": annotation_path} if annotation_path else {}),
+            }},
         ])
         if annotation_panel is None:
             operations.append({"op": "add_panel", "panel": {"id": "annotation_panel", "kind": "signal_tracks", "label": "Gene annotation", "height_cm": 0.5, "layers": []}})
@@ -4262,8 +4702,11 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
             or "/regions/" in existing_path
             or str(existing_source.get("label", "")).startswith("区域基因") if existing_source else False
         )
-        if existing_source and existing_source.get("type") in {"gtf", "gff"} and str(existing_source.get("path")) != str(track_path):
-            operations.append({"op": "update", "target_kind": "source", "target_id": existing_source_id, "field": "path", "value": track_path})
+        if existing_source and existing_source.get("type") in {"gtf", "gff"}:
+            if str(existing_source.get("path")) != str(track_path):
+                operations.append({"op": "update", "target_kind": "source", "target_id": existing_source_id, "field": "path", "value": track_path})
+            if annotation_path and existing_source.get("annotation_source_path") != annotation_path:
+                operations.append({"op": "update", "target_kind": "source", "target_id": existing_source_id, "field": "annotation_source_path", "value": annotation_path})
         if existing_source and existing_source.get("label") != reference_source_label:
             operations.append({"op": "update", "target_kind": "source", "target_id": existing_source_id, "field": "label", "value": reference_source_label})
         if existing_gene_layer.get("label") != gene:
@@ -4273,13 +4716,14 @@ def _gene_annotation_intent(service: WorkspaceService, session: FigureSession, m
             if annotation_panel is not None:
                 operations.append({"op": "update", "target_kind": "panel", "target_id": annotation_panel.get("id"), "field": "height_cm", "value": 0.5})
     moved = not _region_overlaps(current_viewport, location.chrom, location.start, location.end)
+    annotation_name = Path(str(track_annotation_path)).name if track_annotation_path else reference_label
     if moved:
         if has_gene_track:
-            reply = f"已切换到 {location.chrom}:{max(0, location.start - 500_000):,}-{location.end + 500_000:,}，并更新为 {gene} 基因注释轨道。"
+            reply = f"已切换到 {location.chrom}:{max(0, location.start - 500_000):,}-{location.end + 500_000:,}，并从 {annotation_name} 筛出 {gene} 的注释记录；轨道中不包含其他基因。"
         else:
-            reply = f"已切换到 {location.chrom}:{max(0, location.start - 500_000):,}-{location.end + 500_000:,}，并添加 {gene} 的 {location.assembly} 基因注释轨道；原 Hi-C 图层保留。"
+            reply = f"已切换到 {location.chrom}:{max(0, location.start - 500_000):,}-{location.end + 500_000:,}，并从 {annotation_name} 筛出 {gene} 的注释记录；原 Hi-C 图层保留，轨道中不包含其他基因。"
     else:
-        reply = f"将添加 {gene} 的 {location.assembly} 基因注释轨道，并保留当前 Hi-C 图层。"
+        reply = f"将从 {annotation_name} 筛出 {gene} 的注释记录，轨道中不包含其他基因；保留当前视野和其余图层。"
     if any(token in message for token in ("还有其他", "还有别的", "其他可以标注", "别的可以标注")):
         gene_count = service.references.complete_gene_count(build)
         if gene_count:

@@ -44,7 +44,7 @@ class FigureTypeCatalogueTests(unittest.TestCase):
     def test_hic_input_counts_are_explicit(self):
         self.assertEqual(FIGURE_TYPE_BY_ID["hic_triangle"]["input_cardinality"]["hic"], {"min": 1, "max": 1})
         self.assertEqual(FIGURE_TYPE_BY_ID["hic_multi"]["input_cardinality"]["hic"], {"min": 2, "max": 2})
-        self.assertEqual(FIGURE_TYPE_BY_ID["compartment_multi"]["input_cardinality"]["hic"], {"min": 2, "max": None})
+        self.assertNotIn("compartment_multi", FIGURE_TYPE_BY_ID)
 
     def test_backend_rejects_the_wrong_hic_count(self):
         _validate_hic_count("hic_triangle", 1)

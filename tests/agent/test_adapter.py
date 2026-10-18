@@ -4,7 +4,7 @@ import re
 import tempfile
 import unittest
 
-from cfizz.agent import CfizzRenderAdapter, DataInspector, FigureSpecValidator
+from cfizz.agent import CfizzRenderAdapter, DataInspector, FigurePatchEngine, FigureSpecValidator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +37,44 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(request.kwargs["tracks"][0]["labels"], True)
         self.assertEqual(request.kwargs["tracks"][1]["labels"], False)
         self.assertEqual(request.kwargs["tracks"][-1]["max_value"], 10)
+
+    def test_render_request_preserves_requested_track_order_and_assay_colors(self):
+        ordered_ids = [
+            "atac_normal_layer", "atac_variant_layer",
+            "ctcf_normal_layer", "ctcf_variant_layer",
+        ]
+        patch = {
+            "operations": [{
+                "op": "reorder_layers",
+                "panel_id": "signal_panel",
+                "layer_ids": ordered_ids,
+            }]
+        }
+        for layer in self.spec["panels"][2]["layers"]:
+            if layer["id"].startswith("atac_"):
+                layer["style"]["color"] = "#0072B2"
+            elif layer["id"].startswith("ctcf_"):
+                layer["style"]["color"] = "#E69F00"
+        resolved = FigurePatchEngine().apply(self.spec, patch).spec
+        with tempfile.TemporaryDirectory() as output_dir:
+            request = CfizzRenderAdapter(FigureSpecValidator(), output_dir).build_request(
+                resolved, inspect_files=False,
+            )
+
+        label_to_id = {
+            layer.get("label"): layer["id"]
+            for panel in resolved["panels"]
+            for layer in panel["layers"]
+        }
+        signal_tracks = [
+            track for track in request.kwargs["tracks"]
+            if track.get("name") in label_to_id and label_to_id[track["name"]] in ordered_ids
+        ]
+        track_ids = [label_to_id[track["name"]] for track in signal_tracks]
+        self.assertEqual(track_ids, ordered_ids)
+        self.assertEqual([track["color"] for track in signal_tracks], [
+            "#0072B2", "#0072B2", "#E69F00", "#E69F00",
+        ])
 
     def test_render_supports_injected_renderer_and_collects_artifacts(self):
         inspector = DataInspector([str(PROJECT_ROOT)])
@@ -367,9 +405,14 @@ class AdapterTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 spec["data_sources"].extend([
-                    {"id": f"loop_{sample}", "type": "bedpe", "role": "loops", "sample": sample, "path": str(loop)},
-                    {"id": f"tad_{sample}", "type": "insulation_tsv", "role": "insulation", "sample": sample, "path": str(insulation)},
+                    {"id": f"loop_{sample}", "type": "bedpe", "role": "loops", "sample": f"{sample}_HiC.10k.loops", "path": str(loop)},
+                    {"id": f"tad_{sample}", "type": "insulation_tsv", "role": "insulation", "sample": f"{sample}_HiC.10k.insulation", "path": str(insulation)},
                 ])
+                hic_source = next(item for item in spec["data_sources"] if item.get("sample") == sample)
+                spec.setdefault("metadata", {}).setdefault("workflow_bindings", []).append({
+                    "anchor_path": hic_source["path"],
+                    "companions": {"loops": str(loop), "insulation": str(insulation)},
+                })
             inspector = DataInspector([str(PROJECT_ROOT), root])
             request = CfizzRenderAdapter(FigureSpecValidator(inspector), root).build_request(spec, inspect_files=False)
             self.assertEqual(request.entrypoint, "cfizz.api.quick_plot_integrated")

@@ -31,16 +31,18 @@
   },
   {
     "id": "tracks.reorder",
-    "description": "调整当前图中基因、区间和 BigWig 轨道的显示顺序。target 选择要移动的那一条；before_layer_id 指定它要放到哪条轨道之前，省略则放到目标面板末尾。",
+    "description": "调整当前图中基因、区间和 BigWig 轨道的显示顺序。单条轨道移动时 target 只选一条并用 before_layer_id 指定插入位置；完整排序时 target.ids 按最终从上到下的顺序列出所有要归组的真实 layer ID，并在 arguments.panel_id 填所在面板，服务端会一次性重排这些轨道并保留未提及轨道的相对位置。",
     "examples": [
       "把 ATAC normal 放到 CTCF normal 上面",
       "把 MYC 基因轨道放到 ATAC 前面",
-      "把 RNA 放到最后"
+      "把 RNA 放到最后",
+      "按 H1 ATAC、HFFc6 ATAC、H1 CTCF、HFFc6 CTCF 的顺序排列"
     ],
     "target_scope": "layer",
     "allowed_kinds": ["bigwig", "genes", "intervals"],
     "arguments": {
-      "before_layer_id": {"type": "string", "required": false}
+      "before_layer_id": {"type": "string", "required": false},
+      "panel_id": {"type": "string", "required": false}
     },
     "requires_confirmation": false
   },

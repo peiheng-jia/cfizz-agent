@@ -11,6 +11,7 @@ from cfizz.agent.planner import (
     ParameterEdit,
     PlannedEdit,
     PlannerOutput,
+    PlannedRequirement,
     ReferenceRequest,
     RuleFirstPlanner,
     build_planner_registry_from_env,
@@ -23,7 +24,7 @@ from cfizz.agent.parameters import (
     visualization_parameter_catalog,
     workflow_parameter_names,
 )
-from cfizz.agent.figure_types import FIGURE_TYPES
+from cfizz.agent.figure_types import FIGURE_TYPES, function_catalog
 from cfizz.agent.capabilities import CapabilityCall, TargetSelector
 
 
@@ -91,6 +92,74 @@ class NeverAiPlanner:
 
 
 class PlannerTests(unittest.TestCase):
+    def test_function_catalog_includes_installed_cfizz_callable_signature(self):
+        track_api = next(
+            item for item in function_catalog()
+            if item["entrypoint"] == "cfizz.api.plot_track_files"
+        )
+        self.assertTrue(track_api["runtime_verified"])
+        self.assertIn(
+            "tracks",
+            {parameter["name"] for parameter in track_api["runtime_parameters"]},
+        )
+
+    def test_multi_part_plan_reports_each_requirement_and_partial_support(self):
+        output = PlannerOutput(
+            action="patch",
+            reply="将调整当前图中支持的项目。",
+            parameter_edits=[ParameterEdit(
+                target_kind="layout", parameter="right_margin_cm", value=3.0,
+            )],
+            requirements=[
+                PlannedRequirement(requirement="右侧多留 1 cm", status="will_apply"),
+                PlannedRequirement(
+                    requirement="GTF 只显示 LTBP1", status="unsupported",
+                    detail="当前绘图入口没有基因筛选参数。",
+                ),
+            ],
+        )
+        result = compile_plan(output, load_spec())
+        self.assertEqual(len(result.patch["operations"]), 1)
+        self.assertEqual(
+            [item["status"] for item in result.patch["requirement_plan"]],
+            ["will_apply", "unsupported"],
+        )
+        self.assertIn("右侧多留 1 cm — 将执行", result.reply)
+        self.assertIn("GTF 只显示 LTBP1 — 暂不支持", result.reply)
+
+    def test_requirement_cannot_claim_execution_without_an_edit(self):
+        output = PlannerOutput(
+            action="patch",
+            reply="会调整。",
+            requirements=[PlannedRequirement(requirement="改区域", status="will_apply")],
+        )
+        with self.assertRaisesRegex(ValueError, "至少需要一个 edit"):
+            compile_plan(output, load_spec())
+
+    def test_numbered_request_without_complete_requirement_plan_is_not_executed(self):
+        class IncompleteAiPlanner:
+            def interpret(self, message, spec, history=None, workspace_context=None):
+                return compile_plan(PlannerOutput(
+                    action="patch",
+                    reply="将调整右侧留白。",
+                    parameter_edits=[ParameterEdit(
+                        target_kind="layout", parameter="right_margin_cm", value=3.0,
+                    )],
+                    requirements=[PlannedRequirement(
+                        requirement="右侧多留 1 cm", status="will_apply",
+                    )],
+                ), spec)
+
+            def status(self):
+                return {"mode": "ai-assisted", "provider": "fake", "model": "fake"}
+
+        result = RuleFirstPlanner(IncompleteAiPlanner()).interpret(
+            "1、右侧多留 1cm。2、把区域改到 chr2。", load_spec(),
+        )
+        self.assertEqual(result.action, "clarify")
+        self.assertIsNone(result.patch)
+        self.assertIn("没有执行", result.reply)
+
     def test_visualization_registry_covers_every_ready_figure_type(self):
         catalog = visualization_parameter_catalog()
         ready = {item["id"] for item in FIGURE_TYPES if item["ready"]}
@@ -452,6 +521,9 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(workspace["visualizations"][0]["status"], "ready")
         self.assertEqual(workspace["render_evidence"]["displayed_preview_version"], "v0001")
         self.assertEqual(workspace["render_evidence"]["job_status"], "failed")
+        prompt = client.responses.call["input"][0]["content"]
+        self.assertIn("每个修改目标", prompt)
+        self.assertIn("默认修改 current_figure", prompt)
 
     def test_deepseek_uses_same_safe_schema_with_its_provider_identity(self):
         output = PlannerOutput(action="clarify", reply="请明确要修改哪条轨道。", edits=[])
@@ -554,6 +626,35 @@ class PlannerTests(unittest.TestCase):
         result = RuleFirstPlanner(NeverCalled()).interpret("把 ATAC normal 放到 CTCF normal 上面", load_spec())
         self.assertEqual(result.action, "patch")
         self.assertEqual(result.patch["operations"][0]["op"], "move_layer")
+        self.assertEqual(result.planner, "rules")
+
+    def test_rule_first_handles_complete_track_order_without_calling_model(self):
+        class NeverCalled:
+            def interpret(self, message, spec):
+                raise AssertionError("a concrete full track order should be applied deterministically")
+
+            def status(self):
+                return {"mode": "ai-assisted", "provider": "fake", "model": "test"}
+
+        result = RuleFirstPlanner(NeverCalled()).interpret(
+            "按顺序排列 hiPSC_nor ATAC、hiPSC_var ATAC、hiPSC_nor CTCF、hiPSC_var CTCF",
+            load_spec(),
+        )
+        self.assertEqual(result.action, "patch")
+        self.assertEqual(result.patch["operations"][0]["op"], "reorder_layers")
+        self.assertEqual(result.planner, "rules")
+
+    def test_rule_first_handles_assay_color_mapping_without_calling_model(self):
+        class NeverCalled:
+            def interpret(self, message, spec):
+                raise AssertionError("assay colors derived from current layer labels should be deterministic")
+
+            def status(self):
+                return {"mode": "ai-assisted", "provider": "fake", "model": "test"}
+
+        result = RuleFirstPlanner(NeverCalled()).interpret("按组学技术设置不同的颜色", load_spec())
+        self.assertEqual(result.action, "patch")
+        self.assertTrue(all(item.get("field") == "style.color" for item in result.patch["operations"]))
         self.assertEqual(result.planner, "rules")
 
     def test_connected_ai_gets_natural_language_before_matching_local_rules(self):

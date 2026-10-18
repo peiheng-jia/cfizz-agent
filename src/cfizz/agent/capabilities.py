@@ -191,8 +191,19 @@ class CapabilityRegistry:
         return operations
 
     def _compile_tracks_reorder(self, args, targets):
+        if len(targets) > 1:
+            if args.get("before_layer_id"):
+                raise ValueError("完整顺序与单轨插入位置不能同时指定。")
+            panel_id = args.get("panel_id")
+            if not panel_id:
+                raise ValueError("完整排序需要指定这些轨道所在的 panel_id。")
+            return [{
+                "op": "reorder_layers",
+                "panel_id": panel_id,
+                "layer_ids": [item["id"] for item in targets],
+            }]
         if len(targets) != 1:
-            raise ValueError("一次只能移动一条轨道；请明确要调整哪条轨道。")
+            raise ValueError("至少选择一条要调整的轨道。")
         layer_id = targets[0]["id"]
         before_layer_id = args.get("before_layer_id")
         if before_layer_id == layer_id:

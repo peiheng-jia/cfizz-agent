@@ -39,6 +39,99 @@ class IntentInterpreterTests(unittest.TestCase):
         result = self.interpreter.interpret("把 ATAC 改成蓝色", self.spec)
         self.assertEqual(result.action, "clarify")
 
+    def test_explicit_track_sequence_is_compiled_as_one_atomic_order(self):
+        spec = load_spec()
+        layers = next(panel for panel in spec["panels"] if panel["id"] == "signal_panel")["layers"]
+        names = {
+            "atac_normal_layer": "H1_hESC ATAC",
+            "atac_variant_layer": "HFFc6 ATAC",
+            "ctcf_normal_layer": "H1_hESC CTCF",
+            "ctcf_variant_layer": "HFFc6 CTCF",
+        }
+        for layer in layers:
+            if layer["id"] in names:
+                layer["label"] = names[layer["id"]]
+
+        result = self.interpreter.interpret(
+            "按顺序排列 H1_hESC ATAC、HFFc6 ATAC、H1_hESC CTCF、HFFc6 CTCF",
+            spec,
+        )
+        self.assertEqual(result.action, "patch")
+        operation = result.patch["operations"][0]
+        self.assertEqual(operation["op"], "reorder_layers")
+        self.assertEqual(operation["layer_ids"], list(names))
+
+    def test_assay_and_sample_grouping_is_inferred_from_track_labels(self):
+        spec = load_spec()
+        layers = next(panel for panel in spec["panels"] if panel["id"] == "signal_panel")["layers"]
+        names = {
+            "atac_normal_layer": "H1_hESC ATAC",
+            "atac_variant_layer": "HFFc6 ATAC",
+            "ctcf_normal_layer": "H1_hESC CTCF",
+            "ctcf_variant_layer": "HFFc6 CTCF",
+            "h3k27ac_normal_layer": "H1_hESC H3K27ac",
+            "h3k27ac_variant_layer": "HFFc6 H3K27ac",
+            "rna_normal_layer": "H1_hESC RNA",
+            "rna_variant_layer": "HFFc6 RNA",
+        }
+        for layer in layers:
+            if layer["id"] in names:
+                layer["label"] = names[layer["id"]]
+
+        result = self.interpreter.interpret(
+            "不同组学 tracks 放在一起，两个 CTCF 一起、两个 ATAC 一起；按 H1_hESC 在上、HFFc6 在下排列，并按组学技术设置不同颜色",
+            spec,
+        )
+        operation = result.patch["operations"][0]
+        self.assertEqual(operation["op"], "reorder_layers")
+        self.assertEqual(operation["layer_ids"][:4], [
+            "atac_normal_layer", "atac_variant_layer", "ctcf_normal_layer", "ctcf_variant_layer",
+        ])
+        colors = {
+            item["target_id"]: item["value"]
+            for item in result.patch["operations"]
+            if item.get("field") == "style.color"
+        }
+        self.assertEqual(colors["atac_normal_layer"], colors["atac_variant_layer"])
+        self.assertEqual(colors["ctcf_normal_layer"], colors["ctcf_variant_layer"])
+        self.assertNotEqual(colors["atac_normal_layer"], colors["ctcf_normal_layer"])
+
+    def test_assay_color_request_uses_one_color_per_assay_across_samples(self):
+        spec = load_spec()
+        layers = next(panel for panel in spec["panels"] if panel["id"] == "signal_panel")["layers"]
+        for layer in layers:
+            if layer["kind"] == "bigwig":
+                prefix = "H1_hESC" if "normal" in layer["id"] else "HFFc6"
+                assay = layer["id"].replace("_normal_layer", "").replace("_variant_layer", "")
+                layer["label"] = f"{prefix} {assay}"
+
+        result = self.interpreter.interpret("按组学技术给 tracks 设置不同的颜色", spec)
+        operations = result.patch["operations"]
+        color_by_layer = {item["target_id"]: item["value"] for item in operations}
+        self.assertEqual(color_by_layer["atac_normal_layer"], "#0072B2")
+        self.assertEqual(color_by_layer["atac_variant_layer"], "#0072B2")
+        self.assertEqual(color_by_layer["ctcf_normal_layer"], "#E69F00")
+        self.assertEqual(color_by_layer["ctcf_variant_layer"], "#E69F00")
+
+    def test_order_and_assay_colors_are_applied_together(self):
+        spec = load_spec()
+        layers = next(panel for panel in spec["panels"] if panel["id"] == "signal_panel")["layers"]
+        names = {
+            "atac_normal_layer": "H1_hESC ATAC",
+            "atac_variant_layer": "HFFc6 ATAC",
+            "ctcf_normal_layer": "H1_hESC CTCF",
+            "ctcf_variant_layer": "HFFc6 CTCF",
+        }
+        for layer in layers:
+            if layer["id"] in names:
+                layer["label"] = names[layer["id"]]
+        result = self.interpreter.interpret(
+            "按顺序排列 H1_hESC ATAC、HFFc6 ATAC、H1_hESC CTCF、HFFc6 CTCF，并按组学技术设置不同颜色",
+            spec,
+        )
+        self.assertEqual(result.patch["operations"][0]["op"], "reorder_layers")
+        self.assertEqual(len(result.patch["operations"]), 9)  # order + all eight signal colors
+
     def test_recognizes_undo(self):
         self.assertEqual(self.interpreter.interpret("撤销", self.spec).action, "undo")
 

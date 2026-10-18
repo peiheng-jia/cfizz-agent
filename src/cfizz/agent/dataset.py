@@ -1207,6 +1207,16 @@ def _sample_and_group(stem: str, assay: Optional[str]) -> tuple[Optional[str], O
             "",
             sample,
         )
+        # Companion filenames often append the assay, matrix resolution, and
+        # role after the biological sample, for example
+        # ``H1_hESC_HiC.10k.loops.txt``. Keep only the sample identity so it
+        # can pair with the corresponding Hi-C matrix.
+        sample = re.sub(
+            r"(?i)(?:[._-]hic)?[._-]\d+(?:k|kb|bp)?[._-](?:loops?|loopcalls?)$",
+            "",
+            sample,
+        )
+        sample = re.sub(r"(?i)(?:[._-](?:hic)?[._-]?(?:loops?|loopcalls?))$", "", sample)
     for token in ("ATAC-Seq", "ATAC", "CUTTag-H3K27ac", "CUTTag-CTCF", "H3K27ac", "CTCF", "RNA-Seq", "RNA", "chr17_mean", "_mean"):
         sample = re.sub(re.escape(token), "", sample, flags=re.IGNORECASE)
     sample = re.sub(r"[_\-.]+$", "", sample).strip(" _-." )
@@ -1281,8 +1291,6 @@ def _capabilities(files: list[DatasetFile]) -> list[Dict[str, Any]]:
         capabilities.append({"id": "tad_multi", "label": "多样本 TAD 对比", "ready": "hic" in roles})
     if "boundaries" in roles and "hic" in roles:
         capabilities.append({"id": "tad_boundary_pileup", "label": "TAD Boundary Pileup", "ready": True})
-    if "compartment" in roles and "oe" in roles and "hic" in roles:
-        capabilities.append({"id": "compartment_multi", "label": "多样本 Compartment", "ready": True})
     if "loops" in roles and "hic" in roles:
         capabilities.extend([
             {"id": "loop_multi", "label": "多样本 Loop 区域对比", "ready": True},

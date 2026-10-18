@@ -14,6 +14,21 @@ def load_spec():
 
 
 class FigurePatchEngineTests(unittest.TestCase):
+    def test_reorders_selected_layers_as_one_group_without_moving_other_layers(self):
+        result = FigurePatchEngine().apply(load_spec(), {
+            "operations": [{
+                "op": "reorder_layers",
+                "panel_id": "signal_panel",
+                "layer_ids": ["ctcf_normal_layer", "atac_normal_layer"],
+            }],
+        })
+        signal = next(panel for panel in result.spec["panels"] if panel["id"] == "signal_panel")
+        self.assertEqual(
+            [layer["id"] for layer in signal["layers"]],
+            ["ctcf_normal_layer", "atac_normal_layer", "atac_variant_layer", "h3k27ac_normal_layer", "h3k27ac_variant_layer", "ctcf_variant_layer", "rna_normal_layer", "rna_variant_layer"],
+        )
+        self.assertEqual(result.impact, "render_only")
+
     def test_updates_layer_by_stable_id_without_mutating_input(self):
         spec = load_spec()
         result = FigurePatchEngine().apply(spec, {

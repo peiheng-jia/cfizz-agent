@@ -53,7 +53,7 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["id"] for item in catalog["providers"]], ["local", "openai", "deepseek"])
         self.assertTrue(catalog["providers"][0]["available"])
         figure_types = (await self.client.get("/api/figure-types")).json()["figure_types"]
-        self.assertGreaterEqual(len([item for item in figure_types if item["ready"]]), 27)
+        self.assertGreaterEqual(len([item for item in figure_types if item["ready"]]), 26)
         self.assertNotIn("distance_decay", [item["id"] for item in figure_types])
         self.assertIn("compartment", [item["id"] for item in figure_types if item["ready"]])
         self.assertIn("tad_boundary_pileup", [item["id"] for item in figure_types if item["selection_mode"] == "conversation"])
@@ -88,6 +88,7 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="datasetSourceList"', response.text)
         self.assertIn('id="datasetSourceCount"', response.text)
         self.assertIn('id="datasetAuthorizationBanner"', response.text)
+
         self.assertIn('id="dismissDatasetAuthorization"', response.text)
         self.assertIn('id="datasetRegionMode"', response.text)
         self.assertIn('id="datasetRegionStatus"', response.text)
@@ -192,6 +193,125 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(logo.status_code, 200)
         self.assertEqual(logo.headers["content-type"], "image/png")
         self.assertGreater(len(logo.content), 1000)
+
+    def test_generic_hic_comparison_uses_two_selected_matrices_and_current_geometry(self):
+        session = type("Session", (), {"current_spec": {"figure_type": "hic_square"}})()
+        self.assertEqual(
+            agent_web._chat_workflow_type("我选了两个 Hi-C，生成对比图吧"),
+            "hic_multi",
+        )
+        request = agent_web._chat_workflow_request(
+            "生成样本对比图",
+            [],
+            session,
+            workspace_selection={
+                "dataset_path": "/data",
+                "source_paths": ["/data"],
+                "selected_paths": ["/data/sample_a.mcool", "/data/sample_b.mcool"],
+            },
+        )
+        self.assertIsNotNone(request)
+        self.assertEqual(request["figure_type"], "hic_multi")
+        self.assertEqual(request["candidate_paths"], ["/data/sample_a.mcool", "/data/sample_b.mcool"])
+
+    async def test_region_only_request_changes_viewport_and_validates_hic(self):
+        path = PROJECT_ROOT / "demo" / "data" / "hiPSC_nor_chr17.mcool"
+        created = await self.client.post("/api/sessions/from-hic", json={
+            "session_id": "validated_region_only",
+            "hic_path": str(path),
+            "chrom": "chr17",
+            "start": 75_400_000,
+            "end": 76_340_000,
+            "render": False,
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+
+        invalid = await self.client.post(
+            "/api/sessions/validated_region_only/chat",
+            json={"message": "我想看 chr2的32M 到34M", "render": False},
+        )
+        self.assertEqual(invalid.status_code, 200, invalid.text)
+        payload = invalid.json()
+        self.assertEqual(payload["intent"]["action"], "clarify")
+        self.assertIn("不包含 chr2", payload["intent"]["reply"])
+        self.assertEqual(payload["version_id"], "v0001")
+
+        # A range that exists in this matrix changes only the viewport. DPI,
+        # resolution and file bindings stay exactly as they were.
+        valid = await self.client.post(
+            "/api/sessions/validated_region_only/chat",
+            json={"message": "切到 chr17的75M 到76M", "render": False},
+        )
+        self.assertEqual(valid.status_code, 200, valid.text)
+        result = valid.json()
+        self.assertEqual(result["intent"]["planner"], "viewport:data-check")
+        self.assertEqual(result["spec"]["viewport"]["start"], 75_000_000)
+        self.assertEqual(result["spec"]["viewport"]["end"], 76_000_000)
+        self.assertEqual(result["spec"]["export"]["dpi"], created.json()["spec"]["export"]["dpi"])
+        self.assertEqual(result["spec"]["analysis"], created.json()["spec"]["analysis"])
+        self.assertEqual(result["spec"]["data_sources"], created.json()["spec"]["data_sources"])
+
+    async def test_selected_gtf_can_be_filtered_to_one_gene(self):
+        annotation = Path(self.runtime.name) / "gencode.v110.gtf"
+        annotation.write_text(
+            'chr2\ttest\tgene\t33000001\t33010000\t.\t+\t.\tgene_id "ENSG_LTBP1"; gene_name "LTBP1";\n'
+            'chr2\ttest\ttranscript\t33000001\t33010000\t.\t+\t.\tgene_id "ENSG_LTBP1"; gene_name "LTBP1"; transcript_id "T1";\n'
+            'chr2\ttest\texon\t33000001\t33000100\t.\t+\t.\tgene_id "ENSG_LTBP1"; gene_name "LTBP1"; transcript_id "T1";\n'
+            'chr2\ttest\tgene\t33005000\t33015000\t.\t-\t.\tgene_id "ENSG_OTHER"; gene_name "OTHER";\n',
+            encoding="utf-8",
+        )
+        self.app.state.workspace.inspector.authorize_root(self.runtime.name)
+        spec = load_spec()
+        spec.update({
+            "figure_id": "selected_gtf_single_gene",
+            "figure_type": "tracks_mixed",
+            "data_sources": [{"id": "selected_genes", "type": "gtf", "path": str(annotation), "label": annotation.name}],
+            "viewport": {"chrom": "chr2", "start": 32_000_000, "end": 34_000_000, "coordinate_system": "0-based-half-open"},
+            "panels": [{
+                "id": "annotation_panel",
+                "kind": "signal_tracks",
+                "label": "Genes",
+                "height_cm": 0.5,
+                "layers": [{
+                    "id": "genes_layer",
+                    "kind": "genes",
+                    "source_id": "selected_genes",
+                    "label": "All genes",
+                    "visible": True,
+                    "height_cm": 0.5,
+                    "style": {"labels": True, "fontsize": 5},
+                }],
+            }],
+        })
+        created = await self.client.post("/api/sessions", json={
+            "session_id": "selected_gtf_single_gene",
+            "spec": spec,
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+        response = await self.client.post(
+            "/api/sessions/selected_gtf_single_gene/chat",
+            json={
+                "message": "当前 GTF tracks 只显示 LTBP1 一个 gene，不显示范围内的其他 gene",
+                "dataset_selection": {
+                    "dataset_path": self.runtime.name,
+                    "source_paths": [self.runtime.name],
+                    "selected_paths": [str(annotation)],
+                },
+                "render": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["intent"]["planner"], "reference:hg38")
+        self.assertIn("不包含其他基因", payload["intent"]["reply"])
+        filtered_source = next(source for source in payload["spec"]["data_sources"] if source["id"] == "selected_genes")
+        self.assertEqual(filtered_source["annotation_source_path"], str(annotation))
+        filtered_lines = [
+            line for line in Path(filtered_source["path"]).read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")
+        ]
+        self.assertEqual(len(filtered_lines), 3)
+        self.assertTrue(all('gene_name "LTBP1"' in line for line in filtered_lines))
 
     async def test_tad_windows_follow_selected_insulation_columns(self):
         table = Path(self.runtime.name) / "sample.insulation.tsv"
@@ -357,6 +477,42 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(invalid.status_code, 200, invalid.text)
         self.assertEqual(invalid.json()["intent"]["action"], "clarify")
         self.assertIn("无表头 BEDPE", invalid.json()["intent"]["reply"])
+
+    async def test_explicit_loop_sample_pairs_update_current_figure_and_render(self):
+        service = self.app.state.workspace
+        service.inspector.authorize_root(self.runtime.name)
+        pairs = []
+        for sample in ("hiPSC_nor", "hiPSC_var"):
+            loop = Path(self.runtime.name) / f"{sample}_HiC.10k.loops.txt"
+            loop.write_text(
+                "chr17\t75400000\t75410000\tchr17\t75500000\t75510000\n",
+                encoding="utf-8",
+            )
+            pairs.append((sample, loop))
+        spec = load_spec()
+        spec["figure_type"] = "tracks_integrated"
+        for sample, loop in pairs:
+            spec["data_sources"].append({
+                "id": f"loops_{sample}", "type": "bedpe", "role": "loops",
+                "sample": f"{sample}_HiC.10k.loops", "path": str(loop),
+            })
+        service.create("explicit_loop_pairs", spec)
+        response = await self.client.post("/api/sessions/explicit_loop_pairs/chat", json={
+            "message": "hiPSC_nor→hiPSC_nor_HiC.10k.loops.txt, hiPSC_var→hiPSC_var_HiC.10k.loops.txt 是我要的，请重新绘图",
+            "render": False,
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["intent"]["action"], "patch")
+        self.assertEqual(payload["intent"]["planner"], "overlay:explicit-binding")
+        self.assertIn("当前图的区域、其他轨道和样式保持不变", payload["intent"]["reply"])
+        bound = {
+            layer["id"]: layer["style"]["loops_path"]
+            for panel in payload["spec"]["panels"] for layer in panel.get("layers", [])
+            if layer.get("kind") == "hic"
+        }
+        self.assertEqual(bound["hic_normal_layer"], str(pairs[0][1]))
+        self.assertEqual(bound["hic_variant_layer"], str(pairs[1][1]))
 
     async def test_chat_checks_render_result_instead_of_claiming_a_figure_was_drawn(self):
         service = self.app.state.workspace
@@ -913,6 +1069,57 @@ class WebApiTests(unittest.IsolatedAsyncioTestCase):
                 str((data_dir / "51_6_1000.mcool").resolve()),
             },
         )
+
+    async def test_new_hic_comparison_request_replaces_stale_sample_choice(self):
+        """A fresh comparison request must supersede a pending single-file choice."""
+        data_dir = PROJECT_ROOT / "demo" / "cases" / "2121401" / "data"
+        first = str((data_dir / "51_5_1000.mcool").resolve())
+        second = str((data_dir / "51_6_1000.mcool").resolve())
+        created = await self.client.post("/api/sessions/from-dataset", json={
+            "session_id": "chat_hic_choice_replaced",
+            "path": str(data_dir),
+            "selected_paths": [first],
+            "figure_type": "hic_square",
+            "render": False,
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+
+        selection = {
+            "dataset_path": str(data_dir),
+            "source_paths": [str(data_dir)],
+            "selected_paths": [first, second],
+        }
+        single = await self.client.post(
+            "/api/sessions/chat_hic_choice_replaced/chat",
+            json={
+                "message": "生成方形 Hi-C 热图",
+                "dataset_selection": selection,
+                "render": False,
+            },
+        )
+        self.assertEqual(single.status_code, 200, single.text)
+        self.assertEqual(single.json()["intent"]["action"], "clarify")
+        self.assertIn("请选择", single.json()["intent"]["reply"])
+
+        comparison = await self.client.post(
+            "/api/sessions/chat_hic_choice_replaced/chat",
+            json={
+                "message": "生成样本对比图",
+                "dataset_selection": selection,
+                "render": False,
+            },
+        )
+        self.assertEqual(comparison.status_code, 200, comparison.text)
+        payload = comparison.json()
+        self.assertEqual(payload["intent"]["planner"], "chat:workflow")
+        self.assertEqual(payload["intent"]["action"], "workflow_apply")
+        self.assertEqual(payload["spec"]["figure_type"], "hic_multi")
+        hic_paths = {
+            str(Path(source["path"]).resolve())
+            for source in payload["spec"]["data_sources"]
+            if source["type"] in {"cool", "mcool"}
+        }
+        self.assertEqual(hic_paths, {first, second})
 
     async def test_chat_workflow_reuses_path_from_previous_turn(self):
         data_dir = PROJECT_ROOT / "demo" / "cases" / "2121401" / "data"

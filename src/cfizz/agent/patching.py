@@ -21,7 +21,7 @@ _UPDATABLE_FIELDS = {
     "analysis": {"resolution", "balance", "normalization", "shared_color_scale"},
     "layout": {"width_cm", "gap_cm", "left_margin_cm", "right_margin_cm", "font_size"},
     "export": {"formats", "dpi", "output_basename"},
-    "source": {"path", "sample", "label"},
+    "source": {"path", "sample", "label", "annotation_source_path"},
     "panel": {"label", "height_cm"},
     "layer": {"label", "visible", "height_cm", "style"},
 }
@@ -141,6 +141,8 @@ class FigurePatchEngine:
             return [self._remove_layer(spec, operation, index)]
         if op == "move_layer":
             return [self._move_layer(spec, operation, index)]
+        if op == "reorder_layers":
+            return [self._reorder_layers(spec, operation, index)]
         raise FigurePatchError(f"operations[{index}].op 不受支持：{op!r}。")
 
     def _update(self, spec: Dict[str, Any], operation: Mapping[str, Any], index: int) -> AppliedChange:
@@ -317,6 +319,41 @@ class FigurePatchEngine:
         old_path = f"$.panels[id={source_panel.get('id')}].layers[id={layer_id}]"
         new_path = f"$.panels[id={destination_id}].layers[id={layer_id}]"
         return AppliedChange("move_layer", new_path, old_path, new_path, "render_only")
+
+    def _reorder_layers(self, spec: Dict[str, Any], operation: Mapping[str, Any], index: int) -> AppliedChange:
+        panel_id = operation.get("panel_id")
+        layer_ids = operation.get("layer_ids")
+        if not isinstance(layer_ids, list) or len(layer_ids) < 2 or any(not isinstance(item, str) for item in layer_ids):
+            raise FigurePatchError(f"operations[{index}].layer_ids 必须包含至少两个图层 ID。")
+        if len(set(layer_ids)) != len(layer_ids):
+            raise FigurePatchError(f"operations[{index}].layer_ids 不能包含重复 ID。")
+        panel = next((item for item in spec.get("panels", []) if item.get("id") == panel_id), None)
+        if panel is None:
+            raise FigurePatchError(f"找不到 panel {panel_id!r}。")
+        layers = panel.setdefault("layers", [])
+        current_by_id = {item.get("id"): item for item in layers}
+        missing = [item for item in layer_ids if item not in current_by_id]
+        if missing:
+            raise FigurePatchError(f"目标面板中找不到图层：{', '.join(missing)}。")
+
+        selected = set(layer_ids)
+        original_positions = [i for i, item in enumerate(layers) if item.get("id") in selected]
+        insert_at = original_positions[0]
+        ordered_layers = [current_by_id[item] for item in layer_ids]
+        remaining = [item for item in layers if item.get("id") not in selected]
+        # Keep unmentioned layers in their original relative order; insert the
+        # requested group at the first selected layer's former position.
+        remaining_before = sum(1 for i, item in enumerate(layers) if i < insert_at and item.get("id") not in selected)
+        panel["layers"] = remaining[:remaining_before] + ordered_layers + remaining[remaining_before:]
+        old_order = [item.get("id") for item in layers]
+        new_order = [item.get("id") for item in panel["layers"]]
+        return AppliedChange(
+            "reorder_layers",
+            f"$.panels[id={panel_id}].layers",
+            old_order,
+            new_order,
+            "render_only",
+        )
 
     @staticmethod
     def _find_target(spec: Dict[str, Any], target_kind: str, target_id: Optional[str]) -> Tuple[Dict[str, Any], str]:

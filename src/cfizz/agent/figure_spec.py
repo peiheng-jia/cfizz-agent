@@ -235,7 +235,7 @@ class FigureSpecValidator:
         if not is_draft and spec.get("figure_type") in {
             "hic_triangle", "hic_square", "hic_multi",
             "tad_insulation", "tad_multi", "tad_boundary_pileup",
-            "compartment", "compartment_multi", "compartment_saddle",
+            "compartment", "compartment_saddle",
             "loop_heatmap", "loop_multi", "loop_apa", "loop_apa_multi",
             "tracks_integrated", "tad_diff_region", "loop_diff_region",
             "tad_diff_pileup", "loop_diff_apa",

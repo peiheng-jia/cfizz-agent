@@ -15,7 +15,6 @@ from typing import Any, Callable, Dict, List, Optional
 _DEFAULT_RENDER_SECONDS = 30
 _FIGURE_ESTIMATES = {
     "compartment_saddle": 120,
-    "compartment_multi": 90,
     "compartment_diff": 75,
     "compartment_diff_scatter": 75,
     "tad_boundary_pileup": 90,

@@ -9,6 +9,9 @@ CFIZZ entrypoint; the Agent is not allowed to substitute its own plot.
 
 from __future__ import annotations
 
+import importlib
+import inspect
+from functools import lru_cache
 from typing import Any, Dict, List
 
 
@@ -62,7 +65,6 @@ FIGURE_TYPES: List[Dict[str, Any]] = [
     _item("hic_triangle_multi", "comparison", "双样本三角 Hi-C 对比", "cfizz.api.quick_plot_integrated", mode="direct", available_from=("cool", "mcool"), requires=("两个 cool/mcool",), hic_count=(2, 2), description="使用 CFIZZ 官方整合接口，将两个明确勾选的 Hi-C 样本上下镜像绘制为 FOXJ1 示例风格的三角热图；可在下方放置轨道。", track_mode="integrated"),
 
     _item("compartment", "compartment", "A/B Compartment 区域图", "cfizz.api.plot_hic_compartment", mode="direct", available_from=("cool", "mcool"), requires=("E1 TSV",), description="区域 O/E 热图与 E1 轨道。"),
-    _item("compartment_multi", "compartment", "多样本 Compartment 对比", "cfizz.api.generate_multi_compartment", mode="conversation", requires=("每个样本的 E1 TSV", "每个样本的 O/E NPY"), hic_count=(2, None), description="多样本 A/B compartment 与 E1 对齐比较。"),
     _item("compartment_saddle", "pileup", "Compartment Saddle", "cfizz.api.generate_multi_saddle", mode="direct", available_from=("cool", "mcool"), requires=("cool/mcool", "E1 TSV", "参考基因组/GC 校正"), description="A/B compartment 交互鞍形图，支持单样本和多样本。"),
 
     _item("tad_insulation", "tad", "TAD 边界区域图", "cfizz.api.quick_plot_integrated", mode="direct", available_from=("cool", "mcool"), requires=("Insulation TSV",), description="CFIZZ 三角 Hi-C 与 insulation/TAD 边界联合视图；也支持把已选轨道放在下方。", track_mode="integrated"),
@@ -122,10 +124,6 @@ _PAIR_INSULATION = {
 _PAIR_LOOPS = {
     "anchor_role": "hic", "companion_roles": ["loops"], "requires_confirmation": True,
 }
-_PAIR_COMPARTMENT = {
-    "anchor_role": "hic", "companion_roles": ["compartment", "oe"], "requires_confirmation": True,
-}
-
 # Every catalogue row has an explicit machine-readable contract.  UI labels
 # remain explanatory only; no component is allowed to infer scientific input
 # roles by searching for words such as "TAD" or "Loop".
@@ -135,10 +133,6 @@ INPUT_CONTRACTS: Dict[str, Dict[str, Any]] = {
     "hic_multi": _contract({"hic": _HIC_TWO}),
     "hic_triangle_multi": _contract({"hic": _HIC_TWO, "signal": _OPTIONAL, "gene_annotation": _OPTIONAL, "intervals": _OPTIONAL, "loops": _OPTIONAL_LOOPS, "insulation": _OPTIONAL_INSULATION}),
     "compartment": _contract({"hic": _HIC_ONE, "compartment": _role(1, 1, label="E1")}),
-    "compartment_multi": _contract(
-        {"hic": _HIC_MULTI, "compartment": _role(1, 1, label="E1", per_anchor=True), "oe": _role(1, 1, label="O/E", per_anchor=True)},
-        pairing=_PAIR_COMPARTMENT,
-    ),
     "compartment_saddle": _contract({"hic": _role(1, None, label="Hi-C"), "compartment": _role(1, None, label="E1")}),
     "tad_insulation": _contract({"hic": _HIC_ONE, "insulation": _role(1, 1, label="Insulation"), "signal": _OPTIONAL, "gene_annotation": _OPTIONAL, "intervals": _OPTIONAL, "loops": _OPTIONAL_LOOPS}),
     "tad_multi": _contract(
@@ -249,7 +243,40 @@ def function_catalog() -> List[Dict[str, Any]]:
             function["accepted_inputs"][role] = list(_ROLE_FORMATS.get(role, (role,)))
         if item.get("function_inputs"):
             function["nested_inputs"] = item["function_inputs"]
-    return list(functions.values())
+    catalog = list(functions.values())
+    for function in catalog:
+        runtime = _runtime_signature(function["entrypoint"])
+        function.update(runtime)
+    return catalog
+
+
+@lru_cache(maxsize=None)
+def _runtime_signature(entrypoint: str) -> Dict[str, Any]:
+    """Inspect the registered CFIZZ callable so the model sees the installed API."""
+    module_name, separator, attribute = entrypoint.rpartition(".")
+    if not separator:
+        return {"runtime_verified": False, "runtime_parameters": []}
+    try:
+        function = getattr(importlib.import_module(module_name), attribute)
+        signature = inspect.signature(function)
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return {"runtime_verified": False, "runtime_parameters": []}
+    parameters = []
+    for parameter in signature.parameters.values():
+        if parameter.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
+            parameters.append({
+                "name": parameter.name,
+                "kind": "variadic_positional" if parameter.kind == inspect.Parameter.VAR_POSITIONAL else "variadic_keyword",
+            })
+            continue
+        parameters.append({
+            "name": parameter.name,
+            "required": parameter.default is inspect.Parameter.empty,
+        })
+    return {
+        "runtime_verified": True,
+        "runtime_parameters": parameters,
+    }
 
 
 def figure_track_mode(figure_type: str | None) -> str:

@@ -43,6 +43,22 @@ class CapabilityTests(unittest.TestCase):
             ["atac_variant_layer", "h3k27ac_normal_layer", "h3k27ac_variant_layer", "atac_normal_layer", "ctcf_normal_layer", "ctcf_variant_layer", "rna_normal_layer", "rna_variant_layer"],
         )
 
+    def test_atomic_order_groups_requested_tracks_and_keeps_others_stable(self):
+        spec = load_spec()
+        patch = {
+            "operations": [{
+                "op": "reorder_layers",
+                "panel_id": "signal_panel",
+                "layer_ids": ["ctcf_normal_layer", "atac_normal_layer"],
+            }]
+        }
+        patched = FigurePatchEngine().apply(spec, patch).spec
+        signal = next(panel for panel in patched["panels"] if panel["id"] == "signal_panel")
+        self.assertEqual(
+            [layer["id"] for layer in signal["layers"]],
+            ["ctcf_normal_layer", "atac_normal_layer", "atac_variant_layer", "h3k27ac_normal_layer", "h3k27ac_variant_layer", "ctcf_variant_layer", "rna_normal_layer", "rna_variant_layer"],
+        )
+
     def test_tracks_reorder_capability_compiles_without_panel_paths(self):
         call = CapabilityCall(
             capability_id="tracks.reorder",
@@ -52,6 +68,24 @@ class CapabilityTests(unittest.TestCase):
         compiled = CapabilityRegistry().compile(call, load_spec())
         self.assertEqual(compiled.operations, [{
             "op": "move_layer", "layer_id": "rna_variant_layer", "before_layer_id": "atac_normal_layer",
+        }])
+
+    def test_tracks_reorder_compiles_explicit_complete_order_atomically(self):
+        call = CapabilityCall(
+            capability_id="tracks.reorder",
+            target=TargetSelector(
+                scope="layer",
+                ids=["atac_variant_layer", "atac_normal_layer", "ctcf_normal_layer"],
+                panel_id="signal_panel",
+                kinds=["bigwig"],
+            ),
+            arguments_json='{"panel_id":"signal_panel"}',
+        )
+        compiled = CapabilityRegistry().compile(call, load_spec())
+        self.assertEqual(compiled.operations, [{
+            "op": "reorder_layers",
+            "panel_id": "signal_panel",
+            "layer_ids": ["atac_variant_layer", "atac_normal_layer", "ctcf_normal_layer"],
         }])
 
     def test_diverging_palette_updates_hic_map_and_e1_colors(self):

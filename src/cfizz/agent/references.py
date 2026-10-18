@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import difflib
+import hashlib
 from pathlib import Path
 import gzip
 import json
@@ -291,6 +292,110 @@ class ReferenceRegistry:
             if temporary.exists():
                 temporary.unlink()
         return str(cache_path)
+
+    def single_gene_gtf_track(
+        self,
+        annotation_path: str,
+        gene: str,
+        chrom: str,
+        start: int,
+        end: int,
+    ) -> str:
+        """Extract one gene from the selected GTF within the active viewport.
+
+        This keeps user-selected annotation authoritative instead of silently
+        replacing it with the bundled reference.  The original input remains
+        untouched; CFIZZ receives a small derived GTF containing only the
+        requested gene's overlapping records.
+        """
+        source = Path(annotation_path).expanduser().resolve()
+        if not source.is_file():
+            raise ValueError(f"找不到所选 GTF 文件：{source.name}")
+        if not source.name.lower().endswith((".gtf", ".gtf.gz", ".gtf.bgz")):
+            raise ValueError(f"所选文件 {source.name} 不是可读取的 GTF/GFF 注释文件。")
+        if start < 0 or end <= start:
+            raise ValueError("基因注释区域无效。")
+
+        stat = source.stat()
+        signature = "\0".join((
+            str(source), str(stat.st_size), str(stat.st_mtime_ns), gene.upper(),
+            chrom.lower(), str(start), str(end),
+        ))
+        token = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:24]
+        cache_path = self.cache_root / "selected_genes" / f"{token}.gtf"
+        if cache_path.is_file() and cache_path.stat().st_size > 0:
+            return str(cache_path)
+
+        opener = gzip.open if source.name.lower().endswith((".gz", ".bgz")) else open
+        wanted = gene.strip().upper()
+        selected: list[str] = []
+        target_chrom = chrom.lower().removeprefix("chr")
+        try:
+            indexed_lines = None
+            if source.name.lower().endswith((".gz", ".bgz")) and Path(f"{source}.tbi").is_file():
+                try:
+                    import pysam
+                    with pysam.TabixFile(str(source)) as handle:
+                        contig = next(
+                            (
+                                value for value in handle.contigs
+                                if value.lower().removeprefix("chr") == target_chrom
+                            ),
+                            None,
+                        )
+                        indexed_lines = list(handle.fetch(contig, start, end)) if contig else []
+                except ImportError:
+                    indexed_lines = None
+            if indexed_lines is None:
+                # Plain GTF is streamed once; indexed compressed GTF is
+                # queried only for the active interval.
+                with opener(source, "rt", encoding="utf-8") as handle:
+                    candidate_lines = handle
+                    self._append_gene_records(
+                        candidate_lines, selected, wanted, target_chrom, start, end,
+                    )
+            else:
+                self._append_gene_records(
+                    indexed_lines, selected, wanted, target_chrom, start, end,
+                )
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(f"无法读取所选注释文件 {source.name}：{exc}") from exc
+
+        if not selected:
+            raise ValueError(f"在所选文件 {source.name} 的 {chrom}:{start:,}-{end:,} 区域内没有找到 {gene} 的注释记录；我没有换用其他文件。")
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        file_descriptor, temporary_name = tempfile.mkstemp(prefix=".gene_", suffix=".gtf", dir=cache_path.parent)
+        try:
+            with open(file_descriptor, "w", encoding="utf-8", closefd=True) as handle:
+                handle.write(f"# {gene} · {source.name} · {chrom}:{start}-{end}\n")
+                handle.write("\n".join(selected))
+                handle.write("\n")
+            Path(temporary_name).replace(cache_path)
+        finally:
+            temporary = Path(temporary_name)
+            if temporary.exists():
+                temporary.unlink()
+        return str(cache_path)
+
+    @staticmethod
+    def _append_gene_records(lines, selected: list[str], wanted: str, chrom: str, start: int, end: int) -> None:
+        for line in lines:
+            if not line or line.startswith("#"):
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 9 or fields[0].lower().removeprefix("chr") != chrom:
+                continue
+            try:
+                row_start, row_end = int(fields[3]), int(fields[4])
+            except ValueError:
+                continue
+            # GTF coordinates are 1-based inclusive; viewport is
+            # 0-based half-open.  This overlap test handles the edge.
+            if row_end <= start or row_start > end:
+                continue
+            aliases = re.findall(r'(?:gene_name|gene_id)\s+["=]?([^"; ]+)', fields[8])
+            if wanted in {alias.upper() for alias in aliases}:
+                selected.append(line.rstrip("\n"))
 
     @staticmethod
     def annotation_gene_count(path: str) -> int:

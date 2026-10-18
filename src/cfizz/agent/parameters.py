@@ -30,7 +30,7 @@ _HIC_FIGURE_TYPES = frozenset(
 )
 _RESOLUTION_FIGURE_TYPES = _HIC_FIGURE_TYPES
 _BALANCE_FIGURE_TYPES = _HIC_FIGURE_TYPES - frozenset({
-    "compartment_multi", "compartment_diff_region", "compartment_saddle",
+    "compartment_diff_region", "compartment_saddle",
 })
 _INTEGRATED_FIGURE_TYPES = frozenset(
     item["id"] for item in FIGURE_TYPES if item.get("track_mode") == "integrated"
@@ -41,7 +41,7 @@ _STANDALONE_TRACK_FIGURE_TYPES = frozenset({
 _COMPOSITE_FIGURE_TYPES = _INTEGRATED_FIGURE_TYPES | _STANDALONE_TRACK_FIGURE_TYPES
 _LAYOUT_FIGURE_TYPES = _COMPOSITE_FIGURE_TYPES | frozenset({"tad_multi"})
 _DPI_FIGURE_TYPES = _ALL_FIGURE_TYPES - frozenset({
-    "compartment_multi", "compartment_diff_region", "compartment_saddle",
+    "compartment_diff_region", "compartment_saddle",
 })
 
 
@@ -290,10 +290,10 @@ _WORKFLOW_DEFINITIONS = (
     ParameterDefinition("figure", "workflow_options.plot_size", "number", "多样本 Hi-C 子图尺寸", 0.5, 50, default=4, figure_types=frozenset({"hic_multi"})),
 
     # A/B compartment regional comparison.
-    ParameterDefinition("figure", "workflow_options.vmin", "number", "Compartment 色标下限", -100, 100, default=-2, figure_types=frozenset({"compartment_multi", "compartment_diff_region"})),
-    ParameterDefinition("figure", "workflow_options.vmax", "number", "Compartment 色标上限", -100, 100, default=2, figure_types=frozenset({"compartment_multi", "compartment_diff_region"})),
-    ParameterDefinition("figure", "workflow_options.plot_size", "number", "Compartment 子图尺寸", 0.5, 50, default=3.0, figure_types=frozenset({"compartment_multi", "compartment_diff_region"})),
-    ParameterDefinition("figure", "workflow_options.bar_height_ratio", "number", "E1 轨道高度比例", 0.05, 2, default=0.3, figure_types=frozenset({"compartment_multi", "compartment_diff_region"})),
+    ParameterDefinition("figure", "workflow_options.vmin", "number", "Compartment 色标下限", -100, 100, default=-2, figure_types=frozenset({"compartment_diff_region"})),
+    ParameterDefinition("figure", "workflow_options.vmax", "number", "Compartment 色标上限", -100, 100, default=2, figure_types=frozenset({"compartment_diff_region"})),
+    ParameterDefinition("figure", "workflow_options.plot_size", "number", "Compartment 子图尺寸", 0.5, 50, default=3.0, figure_types=frozenset({"compartment_diff_region"})),
+    ParameterDefinition("figure", "workflow_options.bar_height_ratio", "number", "E1 轨道高度比例", 0.05, 2, default=0.3, figure_types=frozenset({"compartment_diff_region"})),
 
     # Differential compartment scatter categories and marginal densities.
     ParameterDefinition("figure", "workflow_options.stable_a_color", "string", "差异散点图 Stable_A 颜色", default="#264653", figure_types=frozenset({"compartment_diff_scatter"})),

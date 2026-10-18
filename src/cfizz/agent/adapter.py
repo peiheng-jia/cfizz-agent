@@ -18,7 +18,7 @@ from .parameters import (
 
 
 _WORKFLOW_FIGURE_TYPES = {
-    "hic_multi", "compartment_multi",
+    "hic_multi",
     "compartment_saddle", "tad_multi", "tad_boundary_pileup",
     "loop_multi", "loop_apa_multi", "tracks_signal", "tracks_genes",
     "tracks_intervals", "tracks_mixed", "tracks_integrated", "compartment_diff_scatter",
@@ -338,6 +338,7 @@ class CfizzRenderAdapter:
         hic_layers: List[Dict[str, Any]],
     ) -> None:
         selected = set(resolved.get("workflow_source_ids") or [])
+        workflow_bindings = (resolved.get("metadata") or {}).get("workflow_bindings") or []
         companions = [
             source for source in sources.values()
             if (not selected or source["id"] in selected)
@@ -354,7 +355,28 @@ class CfizzRenderAdapter:
                     candidates = [source for source in companions if source.get("role") == role]
                     if not candidates:
                         continue
-                    if len(hic_layers) == 1 and len(candidates) == 1:
+                    # Confirmed workflow bindings are authoritative. In
+                    # particular, filenames such as H1_hESC_HiC.10k.loops
+                    # do not have the same inferred sample label as H1_hESC.
+                    hic_path = Path(hic_source["path"]).resolve()
+                    binding = next((
+                        item for item in workflow_bindings
+                        if isinstance(item, dict)
+                        and Path(str(item.get("anchor_path") or "")).resolve() == hic_path
+                    ), None)
+                    bound_path = (binding.get("companions") or {}).get(role) if binding else None
+                    if bound_path:
+                        matches = [
+                            source for source in candidates
+                            if Path(source["path"]).resolve() == Path(str(bound_path)).resolve()
+                        ]
+                        if len(matches) != 1:
+                            raise ValueError(
+                                f"{hic_source.get('sample') or hic_source.get('label') or layer['id']} "
+                                f"的已确认 {role} 文件不在当前选中的数据中，请重新选择文件。"
+                            )
+                        match = matches[0]
+                    elif len(hic_layers) == 1 and len(candidates) == 1:
                         match = candidates[0]
                     else:
                         matches = [
@@ -701,7 +723,7 @@ class CfizzRenderAdapter:
                 "output_path": output_prefix, "resolution": common["resolution"],
                 "balance": common["balance"], "dpi": export.get("dpi", 300),
             }
-        elif figure_type in {"compartment_multi", "compartment_diff_region"}:
+        elif figure_type == "compartment_diff_region":
             if not hic_sources:
                 raise ValueError("多样本 Compartment 图需要 cool/mcool 数据源用于匹配 E1 和 O/E 结果。")
             eig_paths = self._selected_companions(

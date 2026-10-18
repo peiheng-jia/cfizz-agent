@@ -2,7 +2,7 @@ const EXPECTED_API_REVISION = 18;
 const LOCAL_UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024;
 const LOCAL_UPLOAD_SUFFIXES = new Set(['.cool','.mcool','.bw','.bigwig','.gtf','.gff','.gff3','.bed','.bedpe','.tsv','.txt','.npy']);
 const storedFigureZoom = Number.parseInt(localStorage.getItem('cfizz-figure-zoom') || '', 10);
-const state = { sessionId: null, session: null, chatSessionPromise: null, activeJob: null, activeJobInfo: null, previewSessionId: null, previewVersionId: null, datasetActionInFlight: false, datasetPreviewController: null, provider: 'local', planners: [], figureTypes: [], referenceBuilds: [], datasetScan: null, datasetSources: [], activeDatasetKey: null, pendingDatasetPath: null, pendingDatasetOptions: null, datasetSourceRestoring: false, activeWorkflow: null, fileOverrides: {}, contextActiveSourceKey: null, contextFileRole: 'all', contextSelectedPaths: null, contextShowAllSelected: false, contextDraftSelection: null, contextPickerSourceKey: null, contextPickerRole: 'compatible', contextPickerDirectories: {}, renderTimer: null, renderStartedAt: null, language: localStorage.getItem('cfizz-language') || 'zh-CN', regionEdited: false, figureZoom: Number.isFinite(storedFigureZoom) && storedFigureZoom >= 40 && storedFigureZoom <= 200 ? storedFigureZoom : 80 };
+const state = { sessionId: null, session: null, chatSessionPromise: null, activeJob: null, activeJobInfo: null, previewSessionId: null, previewVersionId: null, datasetActionInFlight: false, datasetPreviewController: null, provider: 'local', planners: [], figureTypes: [], referenceBuilds: [], datasetScan: null, datasetSources: [], activeDatasetKey: null, pendingDatasetPath: null, pendingDatasetOptions: null, datasetSourceRestoring: false, activeWorkflow: null, fileOverrides: {}, contextActiveSourceKey: null, contextFileRole: 'all', contextSelectedPaths: null, contextShowAllSelected: false, contextDraftSelection: null, contextPickerSourceKey: null, contextPickerRole: 'compatible', contextPickerDirectories: {}, recentWorkspaceOperation: null, renderTimer: null, renderStartedAt: null, language: localStorage.getItem('cfizz-language') || 'zh-CN', regionEdited: false, figureZoom: Number.isFinite(storedFigureZoom) && storedFigureZoom >= 40 && storedFigureZoom <= 200 ? storedFigureZoom : 80 };
 const $ = (id) => document.getElementById(id);
 
 function openDialog(id, focusId='') {
@@ -470,9 +470,10 @@ function plannerRouteLabel(planner) {
 function addMessage(role, text, planner='') {
   const item = document.createElement('article');
   item.className = `message ${role}`;
-  item.innerHTML = `<span>${role === 'user' ? 'You' : 'Agent'}</span><p></p>`;
+  item.innerHTML = `<span>${role === 'user' ? 'You' : role === 'system' ? 'Workspace update' : 'Agent'}</span><p></p>`;
   const route = plannerRouteLabel(planner);
-  if (role !== 'user' && route) item.querySelector('span').textContent = `Agent · ${route}`;
+  if (role === 'system') item.querySelector('span').textContent = state.language === 'en' ? 'Workspace update' : '工作区操作';
+  else if (role !== 'user' && route) item.querySelector('span').textContent = `Agent · ${route}`;
   item.querySelector('p').textContent = text;
   if (role !== 'user' && (text.length > 320 || text.split('\n').length > 7)) {
     item.classList.add('message-collapsed');
@@ -779,7 +780,7 @@ function contextFigureLabel(item) {
     compartment:'A/B compartment', compartment_saddle:'Compartment saddle',
     tad_insulation:'TAD boundary region',
     tad_boundary_pileup:'TAD boundary pileup', loop_heatmap:'Loop heatmap', loop_apa:'Loop APA',
-    compartment_multi:'Multi-sample compartment comparison', tad_multi:'Multi-sample TAD comparison', loop_multi:'Multi-sample loop comparison',
+    tad_multi:'Multi-sample TAD comparison', loop_multi:'Multi-sample loop comparison',
     loop_apa_multi:'Multi-sample loop APA', tracks_integrated:'Integrated Hi-C multi-omics view', tracks_signal:'BigWig signal tracks',
     tracks_genes:'Gene annotation tracks', tracks_intervals:'BED interval tracks', tracks_mixed:'Mixed genomic tracks',
     compartment_diff_scatter:'Differential compartment scatter', tad_diff_stacked:'Differential TAD boundary classes',
@@ -804,11 +805,42 @@ function contextFigureAvailability(item) {
 }
 
 function setDatasetPathSelected(path, checked) {
-  const key = datasetPathKey(path);
-  const files = contextUsableFiles();
   const selected = new Set(contextSelectedDatasetPaths().map(datasetPathKey));
+  const key = datasetPathKey(path);
   if (checked) selected.add(key); else selected.delete(key);
-  state.contextSelectedPaths = files.filter(file => selected.has(datasetPathKey(file.path))).map(file => file.path);
+  commitContextFileSelection(selected);
+}
+
+function commitContextFileSelection(selection) {
+  const files = contextUsableFiles();
+  const previous = contextSelectedDatasetPaths();
+  const previousKeys = new Set(previous.map(datasetPathKey));
+  const next = files.filter(file => contextFileIsSelectable(file) && selection.has(datasetPathKey(file.path))).map(file => file.path);
+  const nextKeys = new Set(next.map(datasetPathKey));
+  const byKey = new Map(files.map(file => [datasetPathKey(file.path), file]));
+  const describe = path => {
+    const file = byKey.get(datasetPathKey(path));
+    return file ? {name:file.name, role:file.role, sample:file.sample || file.auto_sample || null} : {name:path.split(/[\\/]/).pop(), role:null, sample:null};
+  };
+  const added = next.filter(path => !previousKeys.has(datasetPathKey(path))).map(describe);
+  const removed = previous.filter(path => !nextKeys.has(datasetPathKey(path))).map(describe);
+  state.contextSelectedPaths = next;
+  if (added.length || removed.length) {
+    state.recentWorkspaceOperation = {
+      action:'analysis_file_selection_changed', added, removed,
+      selected_count:next.length,
+      selected_files:next.slice(0, 80).map(describe),
+    };
+    const format = items => items.map(item => item.sample ? `${item.name}（${item.sample}）` : item.name).join('、');
+    const changes = [];
+    if (added.length) changes.push(`新增：${format(added)}`);
+    if (removed.length) changes.push(`移除：${format(removed)}`);
+    const message = state.language === 'en'
+      ? `Analysis files changed. ${added.length ? `Added: ${added.map(item => item.name).join(', ')}. ` : ''}${removed.length ? `Removed: ${removed.map(item => item.name).join(', ')}. ` : ''}${next.length} files are selected. The next request will use this selection.`
+      : `分析文件已更新：${changes.join('；')}。当前选中 ${next.length} 个文件；接下来的对话和绘图会按这份选择重新检查。`;
+    addMessage('system', message, 'ui:file-selection');
+  }
+  if (state.datasetScan && currentFigureTypeItem()) applyContextSelectionToFigure(currentFigureTypeItem());
   renderWorkspaceContext();
 }
 
@@ -1078,12 +1110,9 @@ function openContextFilePicker() {
 
 function applyContextFileSelection() {
   const selected = state.contextDraftSelection || new Set();
-  state.contextSelectedPaths = contextUsableFiles()
-    .filter(file => contextFileIsSelectable(file) && selected.has(datasetPathKey(file.path)))
-    .map(file => file.path);
+  commitContextFileSelection(selected);
   closeDialog('contextFileDialog');
   state.contextDraftSelection = null;
-  renderWorkspaceContext();
 }
 
 function applyContextSelectionToFigure(item=currentFigureTypeItem()) {
@@ -1243,6 +1272,7 @@ function workspaceContextForChat() {
       source:file.dataset_source_label || null, resolutions:Array.isArray(file.resolutions) ? file.resolutions.slice(0, 16) : [],
     })),
     visualizations,
+    recent_operation:state.recentWorkspaceOperation,
   };
 }
 
@@ -1415,7 +1445,7 @@ async function loadFigureTypes() {
     closeWorkflowConfigurator();
     const workflowList = $('workflowCatalog'); workflowList.replaceChildren();
     const workflowEnglish = {
-      hic_multi:'Two-sample Hi-C comparison',compartment_multi:'Multi-sample compartment comparison',compartment_saddle:'Compartment saddle',tad_multi:'Multi-sample TAD comparison',tad_boundary_pileup:'TAD boundary pileup',loop_multi:'Multi-sample loop comparison',loop_apa_multi:'Multi-sample loop APA',tracks_integrated:'Integrated Hi-C multi-omics view',tracks_signal:'BigWig signal tracks',tracks_genes:'Gene annotation tracks',tracks_intervals:'BED interval tracks',tracks_mixed:'Mixed genomic tracks',compartment_diff_scatter:'Differential compartment scatter',tad_diff_stacked:'Differential TAD boundary classes',loop_diff_stacked:'Differential loop classes',compartment_diff_region:'Differential compartment regions',tad_diff_region:'Differential TAD regions',loop_diff_region:'Differential loop regions',tad_diff_pileup:'Differential TAD boundary pileup',loop_diff_apa:'Differential loop APA'
+      hic_multi:'Two-sample Hi-C comparison',compartment_saddle:'Compartment saddle',tad_multi:'Multi-sample TAD comparison',tad_boundary_pileup:'TAD boundary pileup',loop_multi:'Multi-sample loop comparison',loop_apa_multi:'Multi-sample loop APA',tracks_integrated:'Integrated Hi-C multi-omics view',tracks_signal:'BigWig signal tracks',tracks_genes:'Gene annotation tracks',tracks_intervals:'BED interval tracks',tracks_mixed:'Mixed genomic tracks',compartment_diff_scatter:'Differential compartment scatter',tad_diff_stacked:'Differential TAD boundary classes',loop_diff_stacked:'Differential loop classes',compartment_diff_region:'Differential compartment regions',tad_diff_region:'Differential TAD regions',loop_diff_region:'Differential loop regions',tad_diff_pileup:'Differential TAD boundary pileup',loop_diff_apa:'Differential loop APA'
     };
     const workflowCategories = ['comparison','compartment','tad','loop','pileup','tracks','differential'];
     const workflowCategoryLabels = state.language === 'en'
@@ -3314,13 +3344,14 @@ $('datasetUploadInput').addEventListener('change', async event => {
 $('buildDataset').addEventListener('click', async () => {
   const selected = state.datasetScan;
   if (!selected) return;
+  const figureItem = currentFigureTypeItem();
+  applyContextSelectionToFigure(figureItem);
   if (!requireValidDatasetRegion()) return;
   if (!beginDatasetAction()) return;
   try {
     $('buildDataset').disabled = true;
     const chosenPaths = selectedDatasetPaths();
     const selectedHicNames = selected.scan.files.filter(item => item.usable && item.role === 'hic' && chosenPaths.includes(item.path)).map(item => item.name);
-    const figureItem = currentFigureTypeItem();
     const rule = hicCardinality(figureItem);
     const figureReadiness = workflowReadiness(figureItem);
     if (!figureReadiness.ready) {
@@ -3493,7 +3524,14 @@ $('referenceBuild').addEventListener('change', () => {
 $('applyFigureType').addEventListener('click', async () => {
   const figureType = $('figureTypeSelect').value;
   const item = state.figureTypes.find(value => value.id === figureType);
+  if (state.sessionId && !isDraftSession() && state.datasetScan && item) {
+    const contextPaths = contextSelectedDatasetPaths();
+    const workflowPaths = projectedDatasetPathsForFigure(item, contextPaths, contextPaths);
+    await startWorkflow(item, item.label, workflowPaths);
+    return;
+  }
   if ((!state.sessionId || isDraftSession()) && state.datasetScan) {
+    applyContextSelectionToFigure(item);
     if (!requireValidDatasetRegion()) return;
     if (!beginDatasetAction()) return;
     try {

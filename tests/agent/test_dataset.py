@@ -11,6 +11,7 @@ from cfizz.agent.dataset import (
     build_track_patch,
     prepare_workflow_selection,
     scan_dataset,
+    _sample_and_group,
 )
 from cfizz.agent.figure_spec import FigureSpecValidator
 from cfizz.agent.inspection import DataInspector
@@ -24,6 +25,10 @@ class DatasetDiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.inspector = DataInspector([str(PROJECT_ROOT)])
         self.references = ReferenceRegistry(PROJECT_ROOT)
+
+    def test_loop_filename_sample_identity_strips_hic_resolution_and_role(self):
+        self.assertEqual(_sample_and_group("H1_hESC_HiC.10k.loops", "loops")[0], "H1_hESC")
+        self.assertEqual(_sample_and_group("HFFc6_HiC.10k.loops", "loops")[0], "HFFc6")
 
     def test_reference_catalog_and_foxj1_lookup(self):
         catalog = self.references.catalog()
